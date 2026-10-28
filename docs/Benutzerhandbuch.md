@@ -94,6 +94,18 @@ Die Seitenleiste ist in vier Gruppen gegliedert:
 
 Zahlen neben den Einträgen zeigen offene Punkte: Gespräche mit Antwortbedarf, wartende und zurückgestellte Gespräche, Rechnungen, die überfällig oder in den nächsten 7 Tagen fällig sind, neue Einladungen und Regelvorschläge. MailPilot hat kein Dock-Symbol; es lebt in der Menüleiste. Das Dashboard-Fenster öffnet sich beim Start, Schließen beendet die App nicht (beenden über das Menüleisten-Fenster). Unten in der Seitenleiste steht der aktuelle Status. Oben im Fenster löst **Jetzt prüfen** (⟳) sofort einen Durchlauf aus.
 
+### Postfach (eigener Mail-Client, Vorabversion)
+
+Unter **Postfach** liest MailPilot Mails direkt per IMAP, ohne Apple Mail. Derzeit unterstützt: iCloud (und Server mit Implicit TLS auf Port 993); nur Lesen, noch kein Senden.
+
+1. Erzeuge unter appleid.apple.com → Anmeldung und Sicherheit → App-spezifische Passwörter ein Passwort für MailPilot.
+2. *Postfach → iCloud-Konto hinzufügen*: iCloud-Adresse und dieses Passwort eingeben. Das Passwort liegt im Schlüsselbund, nicht in den Einstellungen.
+3. Ordner, Nachrichtenliste und Leseansicht erscheinen. Der gewählte Ordner wird jede Minute abgeglichen, *Postfach abgleichen* sofort.
+
+Beim ersten Abgleich lädt MailPilot die neuesten 200 Nachrichten je Ordner. Eine Nachricht wird beim Öffnen als gelesen markiert (auch auf dem Server). HTML-Mails erscheinen ohne Skripte, externe Bilder und Inhalte sind blockiert, bis du *Laden* klickst. Anhänge speicherst du per Klick.
+
+Noch nicht enthalten: Senden und Antworten, Suche und KI-Funktionen für diese Konten, Verschieben, Löschen, Exchange und Gmail.
+
 ---
 
 ## 3. Täglich arbeiten

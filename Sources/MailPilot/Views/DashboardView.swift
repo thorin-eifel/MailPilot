@@ -1,12 +1,13 @@
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
-    case search, briefing, weekly, needsReply, waiting, snoozed, all, invoices, invites, newsletter, rules, usage, activity, settings
+    case mailbox, search, briefing, weekly, needsReply, waiting, snoozed, all, invoices, invites, newsletter, rules, usage, activity, settings
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .mailbox: "Postfach"
         case .search: "Suche"
         case .briefing: "Briefing"
         case .weekly: "Wochenbericht"
@@ -26,6 +27,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
 
     var symbol: String {
         switch self {
+        case .mailbox: "tray.2.fill"
         case .search: "magnifyingglass"
         case .briefing: "sun.horizon.fill"
         case .weekly: "chart.bar.doc.horizontal"
@@ -57,6 +59,7 @@ struct DashboardView: View {
             // Navigation = Glas (System-Seitenleiste), Inhalte = deckende Flächen.
             List(selection: $selection) {
                 Section {
+                    row(.mailbox, count: nil)
                     row(.search, count: nil)
                     row(.briefing, count: nil)
                     row(.weekly, count: nil)
@@ -100,6 +103,7 @@ struct DashboardView: View {
             ZStack {
                 CTW.bg.ignoresSafeArea()
                 switch selection ?? .needsReply {
+                case .mailbox: MailboxView()
                 case .search: SearchView()
                 case .briefing: BriefingView()
                 case .weekly: WeeklyView()

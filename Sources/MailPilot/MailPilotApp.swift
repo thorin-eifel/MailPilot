@@ -6,7 +6,9 @@ enum EntryPoint {
     static func main() {
         // Eine vorbereitete Wiederherstellung wird eingespielt, bevor die Datenbank geöffnet wird.
         if !CommandLine.arguments.contains(where: { $0.hasPrefix("--selftest") || $0 == "--render" }) { Backups.applyPendingRestore() }
-        if CommandLine.arguments.contains("--selftest-more") {
+        if CommandLine.arguments.contains("--selftest-client") {
+            ClientSelfTest.run()
+        } else if CommandLine.arguments.contains("--selftest-more") {
             SelfTest2.run()
         } else if CommandLine.arguments.contains("--selftest-features") {
             FeatureSelfTest.run()
@@ -192,6 +194,7 @@ enum RenderPreview {
                 let suffix = dark ? "dark" : "light"
                 render(MenuBarView(), size: NSSize(width: 360, height: 420), dark: dark, to: out.appendingPathComponent("menubar-\(suffix).png"))
                 render(DashboardView(initial: .all), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("dashboard-\(suffix).png"))
+                render(DashboardView(initial: .mailbox), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("mailbox-\(suffix).png"))
                 render(DashboardView(initial: .briefing), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("briefing-\(suffix).png"))
                 render(DashboardView(initial: .rules), size: NSSize(width: 1240, height: 1500), dark: dark, to: out.appendingPathComponent("rules-\(suffix).png"))
                 render(DashboardView(initial: .invoices), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("invoices-\(suffix).png"))

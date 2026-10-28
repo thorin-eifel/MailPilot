@@ -13,6 +13,7 @@ struct Row {
     func double(_ k: String) -> Double { values[k] as? Double ?? Double(values[k] as? Int64 ?? 0) }
     func bool(_ k: String) -> Bool { int(k) != 0 }
     func date(_ k: String) -> Date { Date(timeIntervalSince1970: double(k)) }
+    func data(_ k: String) -> Data? { values[k] as? Data }
 }
 
 /// Dünne, thread-sichere SQLite-Hülle.
@@ -48,6 +49,8 @@ final class Database: @unchecked Sendable {
                 case let v as Int64: sqlite3_bind_int64(stmt, idx, v)
                 case let v as Double: sqlite3_bind_double(stmt, idx, v)
                 case let v as Date: sqlite3_bind_double(stmt, idx, v.timeIntervalSince1970)
+                case let v as Data:
+                    v.withUnsafeBytes { raw in _ = sqlite3_bind_blob(stmt, idx, raw.baseAddress, Int32(v.count), SQLITE_TRANSIENT) }
                 case let v as String: sqlite3_bind_text(stmt, idx, v, -1, SQLITE_TRANSIENT)
                 default: sqlite3_bind_text(stmt, idx, "\(p!)", -1, SQLITE_TRANSIENT)
                 }
@@ -64,6 +67,9 @@ final class Database: @unchecked Sendable {
                     case SQLITE_INTEGER: values[name] = sqlite3_column_int64(stmt, c)
                     case SQLITE_FLOAT: values[name] = sqlite3_column_double(stmt, c)
                     case SQLITE_TEXT: values[name] = String(cString: sqlite3_column_text(stmt, c))
+                    case SQLITE_BLOB:
+                        let n = Int(sqlite3_column_bytes(stmt, c))
+                        values[name] = n > 0 ? Data(bytes: sqlite3_column_blob(stmt, c), count: n) : Data()
                     default: break
                     }
                 }
@@ -134,6 +140,17 @@ final class Store: @unchecked Sendable {
         try? db.exec("ALTER TABLE messages ADD COLUMN failed_at REAL")
         try? db.exec("ALTER TABLE messages ADD COLUMN archive_tried INTEGER DEFAULT 0")
         try db.exec("CREATE TABLE IF NOT EXISTS invoice_skip (message_id TEXT PRIMARY KEY, ts REAL)")
+        try db.exec("""
+        CREATE TABLE IF NOT EXISTS c_folder (
+            account TEXT, path TEXT, name TEXT, special TEXT, delimiter TEXT, selectable INTEGER DEFAULT 1,
+            uidvalidity INTEGER DEFAULT 0, uidnext INTEGER DEFAULT 0, synced REAL, PRIMARY KEY (account, path))
+        """)
+        try db.exec("""
+        CREATE TABLE IF NOT EXISTS c_message (
+            account TEXT, folder TEXT, uid INTEGER, message_id TEXT, in_reply_to TEXT, refs TEXT, subject TEXT, sender_name TEXT, sender_email TEXT,
+            recipients TEXT, date REAL, flags TEXT, size INTEGER, preview TEXT, raw BLOB, PRIMARY KEY (account, folder, uid))
+        """)
+        try db.exec("CREATE INDEX IF NOT EXISTS idx_cmsg_date ON c_message(account, folder, date)")
         try db.exec("""
         CREATE TABLE IF NOT EXISTS corrections (
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, message_id TEXT, subject TEXT, account TEXT,

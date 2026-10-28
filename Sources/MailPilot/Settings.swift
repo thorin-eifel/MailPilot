@@ -162,6 +162,8 @@ struct AppSettings: Codable, Equatable {
     var sevenDayPause = 0.9
     /// 0 = unbegrenzt
     var maxCallsPerDay = 0
+    /// Konten des eigenen Mail-Clients (Passwörter liegen im Schlüsselbund).
+    var clientAccounts: [ClientAccount] = []
 
     func isEnabled(_ account: String) -> Bool {
         enabledAccounts.map { $0.contains(account) } ?? true
@@ -274,5 +276,6 @@ extension AppSettings {
         fiveHourPause = v(.fiveHourPause, fiveHourPause)
         sevenDayPause = v(.sevenDayPause, sevenDayPause)
         maxCallsPerDay = v(.maxCallsPerDay, maxCallsPerDay)
+        clientAccounts = v(.clientAccounts, clientAccounts)
     }
 }
