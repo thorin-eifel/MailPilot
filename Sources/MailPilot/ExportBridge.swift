@@ -46,6 +46,17 @@ extension MailBridge {
         return (try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any])?["id"] as? String
     }
 
+    /// Legt einen Termin mit Uhrzeit (oder ganztägig) und Ort an – für Einladungen aus Mails.
+    func createInviteEvent(_ e: InviteEvent, calendarID: String, url: String?) async throws -> String? {
+        let iso = ISO8601DateFormatter()
+        var params: [String: Any] = ["mode": "event", "title": e.summary, "notes": e.notes + (e.organizer.isEmpty ? "" : "\n\nOrganisator: \(e.organizer)"),
+                                     "calendarId": calendarID, "start": iso.string(from: e.start), "end": iso.string(from: e.end), "allDay": e.allDay,
+                                     "location": e.location]
+        if let url { params["url"] = url }
+        let out = try await run(Self.exportScript, params)
+        return (try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any])?["id"] as? String
+    }
+
     /// Selbsttest: legt Erinnerung und Termin an und löscht beide sofort wieder.
     func testExport(list: String, calendarID: String, due: String) async throws -> ExportTestResult {
         let out = try await run(Self.exportScript, ["mode": "test", "list": list, "calendarId": calendarID, "due": due])
@@ -69,15 +80,22 @@ extension MailBridge {
         return { rem: rem, id: id };
       }
 
-      function makeEvent(C, title, notes, due, calendarId, url) {
+      function makeEvent(C, title, notes, due, calendarId, url, timed) {
         const cut = calendarId.lastIndexOf('|');
         const calName = calendarId.slice(0, cut), calIndex = Number(calendarId.slice(cut + 1));
         const matches = C.calendars().filter(c => { try { return c.name() === calName; } catch (e) { return false; } });
         const cal = matches[calIndex];
         if (!cal) throw new Error('Kalender nicht gefunden: ' + calName);
-        const start = day(due);
-        const end = new Date(start.getTime() + 86400000);
+        let start = day(due);
+        let end = new Date(start.getTime() + 86400000);
         const props = { summary: title, startDate: start, endDate: end, alldayEvent: true, description: notes };
+        if (timed && timed.start) {
+          // Einladung: mit Uhrzeit (oder ganztägig) und Ort
+          props.startDate = new Date(timed.start);
+          props.endDate = new Date(timed.end);
+          props.alldayEvent = !!timed.allDay;
+          if (timed.location) props.location = timed.location;
+        }
         if (url) props.url = url;
         const ev = C.Event(props);
         cal.events.push(ev);
@@ -107,7 +125,7 @@ extension MailBridge {
         return JSON.stringify({ id: r.id });
       }
       if (p.mode === 'event') {
-        const e = makeEvent(Application('Calendar'), p.title, p.notes, p.due, p.calendarId, p.url);
+        const e = makeEvent(Application('Calendar'), p.title, p.notes, p.due || '1970-01-01', p.calendarId, p.url, p.start ? p : null);
         return JSON.stringify({ id: e.id });
       }
       // test: anlegen und sofort wieder löschen

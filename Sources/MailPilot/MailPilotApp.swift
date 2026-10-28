@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main
 enum EntryPoint {
@@ -25,9 +26,40 @@ enum EntryPoint {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if Bundle.main.bundleIdentifier != nil { UNUserNotificationCenter.current().delegate = self }
         Engine.shared.start()
+    }
+
+    /// Mitteilungen auch zeigen, wenn MailPilot im Vordergrund ist.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let action = NotificationAction.parse(response.actionIdentifier == UNNotificationDefaultActionIdentifier ? "OPEN" : response.actionIdentifier)
+        guard let key = response.notification.request.content.userInfo["threadKey"] as? String else { return }
+        await Engine.shared.handle(action, threadKey: key)
+    }
+}
+
+/// Symbol in der Menüleiste; merkt sich, wie das Dashboard-Fenster geöffnet wird (für Mitteilungen).
+struct MenuBarLabel: View {
+    @ObservedObject var engine: Engine
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(nsImage: MenuBarIcon.image(busy: engine.isRunning))
+            if engine.needsReply.count > 0 { Text("\(engine.needsReply.count)") }
+        }
+        .onAppear {
+            engine.openDashboard = {
+                openWindow(id: "dashboard")
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
     }
 }
 
@@ -40,9 +72,7 @@ struct MailPilotApp: App {
             MenuBarView()
                 .environmentObject(engine)
         } label: {
-            let count = engine.needsReply.count
-            Image(nsImage: MenuBarIcon.image(busy: engine.isRunning))
-            if count > 0 { Text("\(count)") }
+            MenuBarLabel(engine: engine)
         }
         .menuBarExtraStyle(.window)
 
@@ -52,6 +82,22 @@ struct MailPilotApp: App {
                 .frame(minWidth: 1050, minHeight: 620)
         }
         .defaultLaunchBehavior(.presented)
+        .commands {
+            CommandMenu("Gespräch") {
+                Button("Suche") { engine.requestedSidebar = .search }.keyboardShortcut("f")
+                Divider()
+                Button("Zurückstellen bis morgen früh") { engine.snoozeSelected(.tomorrow) }.keyboardShortcut("j")
+                Button("Zurückstellen bis Montag") { engine.snoozeSelected(.nextMonday) }.keyboardShortcut("j", modifiers: [.command, .shift])
+                Button("Als erledigt markieren") { engine.markSelectedDone() }.keyboardShortcut("e")
+                Button("Antwort in Mail öffnen") { Task { await engine.replySelected() } }.keyboardShortcut("r")
+                Divider()
+                Button("Briefing") { engine.requestedSidebar = .briefing }.keyboardShortcut("0")
+                Button("Antwort nötig") { engine.requestedSidebar = .needsReply }.keyboardShortcut("1")
+                Button("Warte auf Antwort") { engine.requestedSidebar = .waiting }.keyboardShortcut("2")
+                Button("Zurückgestellt") { engine.requestedSidebar = .snoozed }.keyboardShortcut("3")
+                Button("Rechnungen") { engine.requestedSidebar = .invoices }.keyboardShortcut("4")
+            }
+        }
     }
 }
 
@@ -150,6 +196,7 @@ enum RenderPreview {
                 render(DashboardView(initial: .rules), size: NSSize(width: 1240, height: 1500), dark: dark, to: out.appendingPathComponent("rules-\(suffix).png"))
                 render(DashboardView(initial: .invoices), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("invoices-\(suffix).png"))
                 render(DashboardView(initial: .snoozed), size: NSSize(width: 1240, height: 560), dark: dark, to: out.appendingPathComponent("snoozed-\(suffix).png"))
+                render(DashboardView(initial: .invites), size: NSSize(width: 1240, height: 900), dark: dark, to: out.appendingPathComponent("invites-\(suffix).png"))
                 render(DashboardView(initial: .weekly), size: NSSize(width: 1240, height: 1100), dark: dark, to: out.appendingPathComponent("weekly-\(suffix).png"))
                 render(DashboardView(initial: .usage), size: NSSize(width: 1240, height: 1100), dark: dark, to: out.appendingPathComponent("usage-\(suffix).png"))
                 render(DashboardView(initial: .settings), size: NSSize(width: 1240, height: 900), dark: dark, to: out.appendingPathComponent("settings-\(suffix).png"))

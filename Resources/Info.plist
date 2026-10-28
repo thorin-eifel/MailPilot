@@ -22,6 +22,12 @@
     <string>15.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSContactsUsageDescription</key>
+    <string>MailPilot zeigt Namen aus deinen Kontakten an und übernimmt auf Wunsch die Mitglieder einer Kontaktgruppe als VIP-Liste.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>MailPilot liest deine Termine, um freie Zeiten für Antworten vorzuschlagen und Überschneidungen mit Einladungen zu erkennen. Es werden nur Zeiten verwendet, keine Titel.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>MailPilot liest deine Termine, um freie Zeiten für Antworten vorzuschlagen.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>MailPilot liest, sortiert und markiert E-Mails in Apple Mail und erstellt Antwortentwürfe.</string>
 </dict>

@@ -8,6 +8,7 @@ struct SearchView: View {
     @ViewState private var selected: String?
     @ViewState private var searching = false
     @ViewState private var milliseconds = 0
+    @FocusState private var fieldFocused: Bool
 
     var body: some View {
         HSplitView {
@@ -43,6 +44,8 @@ struct SearchView: View {
             .background(CTW.bg)
         }
         .task(id: query) { await run() }
+        .onAppear { fieldFocused = true }
+        .onChange(of: selected) { _, new in engine.selectedThreadKey = new }
     }
 
     private var header: some View {
@@ -53,6 +56,7 @@ struct SearchView: View {
                 Image(systemName: "magnifyingglass").foregroundStyle(CTW.muted)
                 TextField("Betreff, Absender, Zusammenfassung oder Mailtext", text: $query)
                     .textFieldStyle(.plain)
+                    .focused($fieldFocused)
                     .onSubmit { Task { await run(immediately: true) } }
                 if searching { ProgressView().controlSize(.mini) }
                 if !query.isEmpty {

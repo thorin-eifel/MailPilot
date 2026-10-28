@@ -51,9 +51,10 @@ final class MailBridge: @unchecked Sendable {
 
     /// Liest neue Nachrichten aus den Posteingängen (und ggf. Gesendet) der angegebenen Konten.
     func fetch(since: Date, sentSince: Date? = nil, accounts: [String], known: [String], maxNew: Int, includeSent: Bool,
-               contentLimit: Int = 6000, inbox: Bool = true) async throws -> FetchResult {
-        let params: [String: Any] = [
+               contentLimit: Int = 6000, inbox: Bool = true, newestFirst: Bool = false, minDate: Date? = nil) async throws -> FetchResult {
+        var params: [String: Any] = [
             "inbox": inbox,
+            "newestFirst": newestFirst,
             "accounts": accounts,
             "since": since.isoString,
             "sentSince": (sentSince ?? since).isoString,
@@ -62,6 +63,7 @@ final class MailBridge: @unchecked Sendable {
             "includeSent": includeSent,
             "contentLimit": contentLimit,
         ]
+        if let minDate { params["minDate"] = minDate.isoString }
         let out = try await run(fetchScript, params)
         return try JSONDecoder().decode(FetchResult.self, from: Data(out.utf8))
     }
@@ -84,8 +86,8 @@ final class MailBridge: @unchecked Sendable {
     }
 
     /// Öffnet ein Antwortfenster in Mail mit `text` über dem zitierten Original. Gesendet wird nichts.
-    func openReply(messageId: String, at loc: Location, text: String, replyAll: Bool) async throws {
-        _ = try await perform(["action": "reply", "text": text, "replyAll": replyAll], messageId: messageId, loc: loc)
+    func openReply(messageId: String, at loc: Location, text: String, replyAll: Bool, save: Bool = false) async throws {
+        _ = try await perform(["action": "reply", "text": text, "replyAll": replyAll, "save": save], messageId: messageId, loc: loc)
     }
 
     struct BatchItem {
@@ -122,8 +124,8 @@ final class MailBridge: @unchecked Sendable {
     /// Öffnet ein neues Nachrichtenfenster mit Empfängern, Betreff und Text. Gesendet wird nichts.
     /// `visible: false` legt die Nachricht nur unsichtbar an und verwirft sie wieder (Tests).
     @discardableResult
-    func compose(sender: String?, to: [String], subject: String, content: String, visible: Bool = true) async throws -> ComposeResult {
-        var params: [String: Any] = ["to": to, "subject": subject, "content": content, "visible": visible]
+    func compose(sender: String?, to: [String], subject: String, content: String, visible: Bool = true, save: Bool = false) async throws -> ComposeResult {
+        var params: [String: Any] = ["to": to, "subject": subject, "content": content, "visible": visible && !save, "save": save]
         if let sender { params["sender"] = sender }
         let out = try await run(composeScript, params)
         return try JSONDecoder().decode(ComposeResult.self, from: Data(out.utf8))
@@ -208,6 +210,7 @@ final class MailBridge: @unchecked Sendable {
       const Mail = Application('Mail');
       const since = new Date(p.since);
       const sentSince = new Date(p.sentSince);
+      const minDate = p.minDate ? new Date(p.minDate) : null;
       const known = {};
       p.known.forEach(k => { known[k] = true; });
       const out = { messages: [], myAddresses: [], remaining: 0 };
@@ -219,13 +222,21 @@ final class MailBridge: @unchecked Sendable {
       const idsIn = s => s ? (s.match(/<[^>]+>/g) || []).map(x => x.slice(1, -1)) : [];
       function headers(m) {
         let h = '';
-        try { h = m.allHeaders() || ''; } catch (e) { return { irt: null, refs: [], unsub: null, post: null }; }
+        try { h = m.allHeaders() || ''; } catch (e) { return { irt: null, refs: [], unsub: null, post: null, flags: '' }; }
         h = h.replace(/\r?\n[ \t]+/g, ' ');
         const irt = (h.match(/^In-Reply-To:\s*(.*)$/mi) || [])[1];
         const refs = (h.match(/^References:\s*(.*)$/mi) || [])[1];
         const unsub = (h.match(/^List-Unsubscribe:\s*(.*)$/mi) || [])[1];
         const post = (h.match(/^List-Unsubscribe-Post:\s*(.*)$/mi) || [])[1];
-        return { irt: idsIn(irt)[0] || null, refs: idsIn(refs), unsub: unsub || null, post: post || null };
+        // Kennzeichen automatisch erzeugter Mails: damit lassen sie sich ohne Claude einordnen.
+        const flags = [];
+        const auto = (h.match(/^Auto-Submitted:\s*(.*)$/mi) || [])[1];
+        const prec = (h.match(/^Precedence:\s*(.*)$/mi) || [])[1];
+        if (auto && auto.trim().toLowerCase() !== 'no') flags.push('auto');
+        if (prec && /^(bulk|list|junk)/i.test(prec.trim())) flags.push('bulk');
+        if (/^List-Id:/mi.test(h)) flags.push('list');
+        if (/^X-Auto-Response-Suppress:/mi.test(h)) flags.push('suppress');
+        return { irt: idsIn(irt)[0] || null, refs: idsIn(refs), unsub: unsub || null, post: post || null, flags: flags.join(' ') };
       }
 
       function collect(coll, isSent) {
@@ -233,8 +244,10 @@ final class MailBridge: @unchecked Sendable {
         const ids = coll.messageId();
         const dates = isSent ? coll.dateSent() : coll.dateReceived();
         // Älteste zuerst, damit Gesprächsverläufe in der richtigen Reihenfolge entstehen.
-        const order = ids.map((_, i) => i).sort((a, b) => dates[a] - dates[b]);
+        // Standard: älteste zuerst (Gesprächsverläufe entstehen in der richtigen Reihenfolge); Erstscan: neueste zuerst.
+        const order = ids.map((_, i) => i).sort((a, b) => p.newestFirst ? dates[b] - dates[a] : dates[a] - dates[b]);
         for (const i of order) {
+          if (minDate && dates[i] < minDate && !isSent) continue;
           const mid = ids[i];
           if (!mid || known[mid]) continue;
           if (out.messages.length >= p.maxNew) { out.remaining++; continue; }
@@ -262,6 +275,7 @@ final class MailBridge: @unchecked Sendable {
               references: h.refs,
               unsubscribe: h.unsub,
               unsubscribePost: h.post,
+              headerFlags: h.flags,
               to: m.toRecipients.address(),
               cc: m.ccRecipients.address(),
               content: content.slice(0, p.contentLimit),
@@ -301,7 +315,11 @@ final class MailBridge: @unchecked Sendable {
       if (p.sender) { try { msg.sender = p.sender; } catch (e) {} }
       for (const a of p.to) { msg.toRecipients.push(Mail.ToRecipient({ address: a })); }
       const out = { subject: msg.subject(), to: msg.toRecipients.address(), discarded: false };
-      if (p.visible) {
+      if (p.save) {
+        // Als Entwurf ablegen statt ein Fenster zu öffnen.
+        msg.save();
+        try { Mail.delete(msg); } catch (e) {}
+      } else if (p.visible) {
         Mail.activate();
       } else {
         // Nur für Tests: unsichtbar angelegt und wieder verworfen, nichts wird gespeichert oder gesendet.
@@ -543,12 +561,18 @@ final class MailBridge: @unchecked Sendable {
           m.flagIndex = p.flagIndex;
           break;
         case 'reply': {
-          const r = Mail.reply(m, { openingWindow: true, replyToAll: !!p.replyAll });
+          const r = Mail.reply(m, { openingWindow: !p.save, replyToAll: !!p.replyAll });
           delay(0.5);
           let quoted = '';
           try { quoted = r.content() || ''; } catch (e) {}
           r.content = p.text + '\n\n' + quoted;
-          Mail.activate();
+          if (p.save) {
+            // Still als Entwurf ablegen (Ordner „Entwürfe“ des Kontos); gesendet wird nichts.
+            r.save();
+            try { Mail.delete(r); } catch (e) {}
+          } else {
+            Mail.activate();
+          }
           break;
         }
         default:

@@ -97,7 +97,8 @@ struct RulesView: View {
             ForEach($engine.settings.vips) { $vip in
                 HStack(spacing: 10) {
                     IconTile(symbol: "star.fill", color: CTW.action, size: 28)
-                    TextField("Name", text: $vip.name).textFieldStyle(.roundedBorder).frame(maxWidth: 220)
+                    TextField("Name", text: $vip.name).textFieldStyle(.roundedBorder).frame(maxWidth: 220).disabled(vip.fromContacts)
+                    if vip.fromContacts { Badge(text: "Kontakte", color: CTW.accent, symbol: "person.crop.circle") }
                     TextField("Adresse oder Domain, z. B. chef@firma.de oder firma.de", text: $vip.match)
                         .textFieldStyle(.roundedBorder)
                     Button(role: .destructive) { engine.settings.vips.removeAll { $0.id == vip.id } } label: {
@@ -318,6 +319,10 @@ struct RuleForm: View {
                     }
                     Toggle("Im Posteingang lassen", isOn: $rule.keepInInbox).toggleStyle(.switch)
                 }
+                Toggle("Ohne Claude einordnen (spart Aufrufe)", isOn: $rule.skipClaude)
+                    .toggleStyle(.switch)
+                    .disabled(rule.category == nil)
+                    .help("Mails, die diese Regel trifft, bekommen die Kategorie sofort – ohne Zusammenfassung und ohne Antwortentwurf")
             }
         }
     }

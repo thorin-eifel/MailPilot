@@ -25,6 +25,15 @@ struct ThreadsView: View {
         }
     }
 
+    /// Zeigt ein Gespräch aus einer Mitteilung (auch wenn es als erledigt ausgeblendet wäre).
+    private func focus(_ key: String?) {
+        guard let key, filter == nil, !snoozedOnly else { return }
+        hideDone = false
+        search = ""
+        selectedKey = key
+        engine.focusThread = nil
+    }
+
     private func rank(_ t: MailThread) -> Int {
         if snoozedOnly { return 0 }
         if t.isOverdue(followUpDays: engine.settings.followUpDays) { return 0 }
@@ -52,6 +61,9 @@ struct ThreadsView: View {
             .frame(minWidth: 340, idealWidth: 400)
             .background(CTW.surface)
             .searchable(text: $search, placement: .toolbar, prompt: "Gespräche durchsuchen")
+            .onChange(of: selectedKey) { _, new in engine.selectedThreadKey = new }
+            .onChange(of: engine.focusThread) { _, new in focus(new) }
+            .onAppear { focus(engine.focusThread) }
             .toolbar {
                 if filter == nil {
                     Toggle(isOn: $hideDone) { Label("Erledigte ausblenden", systemImage: "checkmark.circle") }

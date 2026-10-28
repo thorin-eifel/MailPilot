@@ -74,6 +74,8 @@ struct RawMessage: Decodable {
     /// Wert des Headers `List-Unsubscribe` (Newsletter-Abmeldung) und `List-Unsubscribe-Post`.
     var unsubscribe: String?
     var unsubscribePost: String?
+    /// Kennzeichen aus den Headern: auto, bulk, list, suppress (durch Leerzeichen getrennt).
+    var headerFlags: String?
 }
 
 struct MailAccountInfo: Decodable, Identifiable, Hashable {
@@ -107,6 +109,9 @@ struct StoredMessage: Identifiable, Hashable {
     var decidedBy: String?
     /// Vom Datenschutz ausgenommen: Inhalt ging nie an Claude.
     var isPrivate = false
+    /// Kennzeichen aus den Mail-Headern (auto, bulk, list, suppress) und `List-Unsubscribe`.
+    var hdrFlags = ""
+    var unsub: String?
 
     var id: String { messageId }
 

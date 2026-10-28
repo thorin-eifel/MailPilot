@@ -29,6 +29,8 @@ enum SelfTest2 {
             try flagTests(tmp)
             try backupTests(tmp)
             try exportTests(tmp)
+            try prefilterTests(tmp)
+            try latestTests(tmp)
         } catch {
             check(false, "Tests liefen ohne Fehler: \(error)")
         }
@@ -415,5 +417,154 @@ enum SelfTest2 {
         let lines = csv.components(separatedBy: "\r\n")
         check(csv.hasPrefix("\u{FEFF}Betreff;Gegenüber;Status") && lines.count == 3 && lines[1].contains("\"Offen; mit \"\"Zeichen\"\"\"") && lines[1].contains(";15.11.2026;") && !csv.contains("Privat"),
               "Export: Gespräche als CSV – maskiert, ohne vertrauliche Gespräche")
+    }
+
+    // MARK: Vorfilter
+
+    static func prefilterTests(_ tmp: URL) throws {
+        let st = AppSettings()
+        func m(from: String = "Shop <news@shop.example>", subject: String = "Unsere Herbst-Angebote", flags: String = "", unsub: String? = nil, mine: Bool = false) -> StoredMessage {
+            var x = RulesSelfTest.msg("p", from: from.contains("<") ? MailAddress.parse(from).email : from, subject: subject, mine: mine)
+            x.hdrFlags = flags
+            x.unsub = unsub
+            return x
+        }
+        func v(_ x: StoredMessage, settings: AppSettings = AppSettings(), history: [(category: String, n: Int)] = [], corrected: Bool = false, vip: Bool = false) -> Prefilter.Verdict? {
+            Prefilter.verdict(for: x, settings: settings, history: history, hasCorrections: corrected, isVIP: vip)
+        }
+        check(v(m(flags: "auto"))?.category == "Benachrichtigungen", "Vorfilter: Auto-Submitted → Benachrichtigungen")
+        check(v(m(flags: "bulk list", unsub: "<https://x>"))?.category == "Newsletter" && v(m(unsub: "<https://x>"))?.category == "Newsletter", "Vorfilter: Abmelde-Link → Newsletter")
+        check(v(m(from: "noreply@dienst.example", subject: "Ihr Login"))?.category == "Benachrichtigungen" && v(m(from: "anna@firma.example", subject: "Hallo")) == nil, "Vorfilter: noreply-Absender, normale Absender bleiben Claude")
+        check(v(m(subject: "Ihre Rechnung Nr. 4711", unsub: "<https://x>")) == nil && v(m(subject: "Terminbestätigung", flags: "auto")) == nil && v(m(subject: "Bestellung 123 versendet", unsub: "<https://x>")) == nil,
+              "Vorfilter: Rechnungen, Termine und Bestellungen gehen immer an Claude")
+        check(v(m(flags: "auto"), vip: true) == nil && v(m(flags: "auto"), corrected: true) == nil && v(m(flags: "auto", mine: true)) == nil, "Vorfilter: VIP, korrigierte Absender und gesendete Mails gehen an Claude")
+        var priv = m(flags: "auto"); priv.isPrivate = true
+        var off = AppSettings(); off.prefilterEnabled = false
+        var noCat = AppSettings(); noCat.categories = noCat.categories.filter { $0.name != "Newsletter" && $0.name != "Benachrichtigungen" }
+        check(v(priv) == nil && v(m(flags: "auto"), settings: off) == nil && v(m(unsub: "<https://x>"), settings: noCat) == nil, "Vorfilter: vertraulich, abgeschaltet oder Kategorie fehlt → Claude")
+        check(v(m(), history: [("Newsletter", 5)])?.source == "Absender-Gedächtnis" && v(m(), history: [("Werbung", 3)])?.category == "Werbung", "Vorfilter: Absender-Gedächtnis (≥3 Mails, ≥90 %)")
+        check(v(m(), history: [("Newsletter", 3), ("Info", 1)]) == nil && v(m(), history: [("Newsletter", 2)]) == nil && v(m(), history: [("Rechnungen", 9)]) == nil && v(m(), history: [("Handlung nötig", 9)]) == nil,
+              "Vorfilter: gemischte, zu wenige oder wichtige Kategorien → Claude")
+        check(v(m(subject: "Rechnung"), history: [("Newsletter", 9)]) == nil, "Vorfilter: Absender-Gedächtnis ignoriert Rechnungs-Betreffs")
+        let a = Prefilter.analysis(for: m(subject: "Herbst-Angebote"), Prefilter.Verdict(category: "Newsletter", reason: "Test", source: "Vorfilter"))
+        check(a.category == "Newsletter" && a.priority == .low && !a.needs_reply && a.thread_status == .info && a.summary == "Herbst-Angebote" && a.reply_draft == nil, "Vorfilter: lokale Analyse ohne Entwurf, niedrige Priorität")
+
+        // Header-Kennzeichen und Verlauf im Speicher
+        let store = try Store(path: tmp.appendingPathComponent("prefilter.sqlite"))
+        func add(_ id: String, from: String, decided: String, category: String, flags: String? = nil, unsub: String? = nil) throws {
+            var r = raw(id, subject: "Mail \(id)", from: from)
+            r.headerFlags = flags
+            r.unsubscribe = unsub
+            try store.insert(r, myAddresses: [])
+            try store.saveAnalysis(of: id, threadKey: id, category: category, priority: .low, summary: nil, decidedBy: decided)
+        }
+        try add("h1", from: "S <news@shop.example>", decided: "Claude", category: "Newsletter", flags: "bulk list", unsub: "<https://x>")
+        try add("h2", from: "S <news@shop.example>", decided: "Claude", category: "Newsletter")
+        try add("h3", from: "S <news@shop.example>", decided: "Vorfilter", category: "Newsletter")
+        try add("h4", from: "S <news@shop.example>", decided: "Korrektur", category: "Werbung")
+        try add("h5", from: "X <x@other.example>", decided: "Claude", category: "Info")
+        let back = try store.message(id: "h1")
+        let h2 = try store.message(id: "h2")
+        check(back?.hdrFlags == "bulk list" && back?.unsub == "<https://x>" && h2?.hdrFlags == "", "Vorfilter: Header-Kennzeichen werden gespeichert")
+        let hist = Dictionary(uniqueKeysWithValues: store.senderHistory(email: "news@shop.example", excluding: "h2").map { ($0.category, $0.n) })
+        check(hist == ["Newsletter": 1, "Werbung": 1], "Vorfilter: Verlauf zählt nur Claude und Nutzer, nicht den Vorfilter und nicht die Mail selbst")
+        try store.saveAnalysis(of: "h3", threadKey: "h3", category: "Newsletter", priority: .low, summary: nil, decidedBy: "Vorfilter")
+        try store.saveAnalysis(of: "h5", threadKey: "h5", category: "Info", priority: .low, summary: nil, decidedBy: "Absender-Gedächtnis")
+        check(store.locallyClassifiedCount(since: Date().addingTimeInterval(-86400)) == 2 && store.classifiedCount(since: Date().addingTimeInterval(-86400)) == 5, "Vorfilter: Zähler für die Nutzungsansicht")
+
+        // Regeln aus älteren Versionen bleiben lesbar
+        let oldRule = #"[{"id":"8D1B2E0A-0000-4000-8000-000000000001","name":"Alt","enabled":true,"matchAll":true,"conditions":[],"keepInInbox":false,"learned":false}]"#
+        let rules = try JSONDecoder().decode([UserRule].self, from: Data(oldRule.utf8))
+        check(rules.count == 1 && rules[0].name == "Alt" && !rules[0].skipClaude, "Regeln: ältere Dateien ohne neue Felder bleiben lesbar")
+        let s2 = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"pollMinutes": 5}"#.utf8))
+        check(s2.prefilterEnabled && s2.modelBulk == "haiku" && s2.initialScanDays == 180 && s2.probeMoveAccounts.isEmpty, "Einstellungen: neue Felder haben sichere Standardwerte")
+    }
+
+    // MARK: Einladungen, freie Zeiten, Kontakte, Mitteilungen
+
+    static func latestTests(_ tmp: URL) throws {
+        let utc = TimeZone(identifier: "UTC")!
+        func iso(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ tz: TimeZone) -> Date {
+            var c = Calendar(identifier: .gregorian); c.timeZone = tz
+            return c.date(from: DateComponents(year: y, month: mo, day: d, hour: h, minute: mi))!
+        }
+        let ics = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:abc-123@example.com\r\nSUMMARY:Projekt-Kickoff\\, intern\r\n"
+            + "DTSTART;TZID=W. Europe Standard Time:20261104T100000\r\nDTEND;TZID=W. Europe Standard Time:20261104T113000\r\n"
+            + "LOCATION:Raum 2\\; Trier\r\nORGANIZER;CN=\"Anna Weber\":mailto:anna@firma.example\r\nDESCRIPTION:Zeile 1\\nZeile\r\n  2\r\nRRULE:FREQ=WEEKLY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        let e = ICSParser.parse(ics)
+        check(e.count == 1 && e[0].uid == "abc-123@example.com" && e[0].summary == "Projekt-Kickoff, intern" && e[0].location == "Raum 2; Trier", "ICS: Titel und Ort (Maskierung)")
+        check(e.first?.start == iso(2026, 11, 4, 10, 0, TimeZone(identifier: "Europe/Berlin")!) && e.first?.end == iso(2026, 11, 4, 11, 30, TimeZone(identifier: "Europe/Berlin")!), "ICS: Outlook-Zeitzone „W. Europe Standard Time“")
+        check(e.first?.organizer == "Anna Weber" && e.first?.recurring == true && e.first?.cancelled == false && e.first?.method == "REQUEST" && e.first?.notes.contains("Zeile 1\nZeile 2") == true, "ICS: Organisator, Serie, Beschreibung mit Zeilenfortsetzung")
+        let u = ICSParser.parse("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:u1\nSUMMARY:UTC\nDTSTART:20261104T093000Z\nDURATION:PT45M\nEND:VEVENT\nEND:VCALENDAR")
+        check(u.first?.start == iso(2026, 11, 4, 9, 30, utc) && u.first?.end == iso(2026, 11, 4, 10, 15, utc), "ICS: UTC-Zeit und Dauer")
+        let d = ICSParser.parse("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:u2\nSUMMARY:Tag\nDTSTART;VALUE=DATE:20261105\nEND:VEVENT\nEND:VCALENDAR")
+        check(d.first?.allDay == true && d.first.map { $0.end.timeIntervalSince($0.start) } == 86400, "ICS: ganztägiger Termin ohne Ende dauert einen Tag")
+        let c = ICSParser.parse("BEGIN:VCALENDAR\nMETHOD:CANCEL\nBEGIN:VEVENT\nUID:u3\nSUMMARY:Absage\nDTSTART:20261104T093000Z\nSTATUS:CANCELLED\nEND:VEVENT\nEND:VCALENDAR")
+        check(c.first?.cancelled == true && ICSParser.parse("kein kalender").isEmpty && ICSParser.parse("BEGIN:VEVENT\nSUMMARY:x\nEND:VEVENT").isEmpty, "ICS: Absagen; Unbrauchbares wird ignoriert")
+        check(ICSParser.parseDuration("PT1H30M") == 5400 && ICSParser.parseDuration("P1D") == 86400 && ICSParser.parseDuration("P1W") == 604800 && ICSParser.parseDuration("x") == nil, "ICS: Dauer")
+        check(ICSParser.timeZone("Europe/Paris").identifier == "Europe/Paris" && ICSParser.timeZone("Romance Standard Time").identifier == "Europe/Paris" && ICSParser.timeZone("Gibt es nicht") == .current, "ICS: Zeitzonen (IANA, Windows, unbekannt)")
+
+        let store = try Store(path: tmp.appendingPathComponent("invites.sqlite"))
+        try store.insert(raw("i1", subject: "Einladung: Projekt-Kickoff", from: "Anna <anna@firma.example>"), myAddresses: [])
+        try store.saveAnalysis(of: "i1", threadKey: "i1", category: "Info", priority: .normal, summary: nil)
+        try store.insert(raw("i2", subject: "Hallo zusammen", from: "B <b@x.de>"), myAddresses: [])
+        try store.saveAnalysis(of: "i2", threadKey: "i2", category: "Info", priority: .normal, summary: nil)
+        try store.insert(raw("i3", subject: "Zusammenfassung", from: "B <b@x.de>"), myAddresses: [])
+        try store.saveAnalysis(of: "i3", threadKey: "i3", category: "Termine", priority: .normal, summary: nil)
+        let cand = try store.inviteCandidates(accounts: ["iCloud"], since: Date().addingTimeInterval(-86400), limit: 10).map(\.messageId).sorted()
+        check(cand == ["i1", "i3"], "Einladungen: Kandidaten über Betreff oder Kategorie „Termine“")
+        try store.markInviteScanned("i1")
+        check(try store.inviteCandidates(accounts: ["iCloud"], since: Date().addingTimeInterval(-86400), limit: 10).map(\.messageId) == ["i3"], "Einladungen: bereits durchsuchte Mails werden nicht erneut geprüft")
+        try store.saveInvite(e[0], messageId: "i1", account: "iCloud", subject: "Einladung", mailDate: Date())
+        var list = try store.invites(accounts: ["iCloud"])
+        check(list.count == 1 && list[0].status == "new" && list[0].event.summary == "Projekt-Kickoff, intern" && list[0].event.recurring, "Einladungen: Termin wird gespeichert")
+        try store.setInviteStatus(e[0].uid, "added")
+        try store.saveInvite(e[0], messageId: "i1", account: "iCloud", subject: "Einladung", mailDate: Date())
+        check(try store.invites(accounts: ["iCloud"]).first?.status == "added", "Einladungen: dieselbe Einladung bleibt „eingetragen“")
+        var moved = e[0]; moved.start = moved.start.addingTimeInterval(3600); moved.end = moved.end.addingTimeInterval(3600)
+        try store.saveInvite(moved, messageId: "i1", account: "iCloud", subject: "Aktualisiert", mailDate: Date())
+        list = try store.invites(accounts: ["iCloud"])
+        check(list.count == 1 && list[0].status == "new", "Einladungen: verschobener Termin wird wieder „neu“")
+        check(try store.invites(accounts: ["Google"]).isEmpty, "Einladungen: nur aktivierte Konten")
+
+        // Freie Zeiten
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        let monday = iso(2026, 11, 2, 7, 0, cal.timeZone)               // Montag, 7 Uhr
+        func b(_ day: Int, _ h1: Int, _ m1: Int, _ h2: Int, _ m2: Int) -> DateInterval { DateInterval(start: iso(2026, 11, day, h1, m1, cal.timeZone), end: iso(2026, 11, day, h2, m2, cal.timeZone)) }
+        var o = FreeSlots.Options(); o.count = 4
+        let free = FreeSlots.find(busy: [], from: monday, calendar: cal, options: o)
+        check(free.count == 4 && cal.component(.hour, from: free[0].start) == 9 && cal.component(.hour, from: free[1].start) == 13 && free[0].duration == 3600, "Freie Zeiten: ohne Termine vormittags 9 und nachmittags 13 Uhr, je Tag zwei")
+        let busy = FreeSlots.find(busy: [b(2, 9, 0, 10, 30), b(2, 13, 0, 17, 0)], from: monday, calendar: cal, options: o)
+        check(cal.component(.hour, from: busy[0].start) == 10 && cal.component(.minute, from: busy[0].start) == 30 && cal.isDate(busy[1].start, inSameDayAs: iso(2026, 11, 3, 9, 0, cal.timeZone)),
+              "Freie Zeiten: belegte Zeiten werden übersprungen, auf halbe Stunden gerundet")
+        let weekend = FreeSlots.find(busy: [], from: iso(2026, 11, 7, 8, 0, cal.timeZone), calendar: cal, options: FreeSlots.Options())      // Samstag
+        check(!weekend.isEmpty && weekend.allSatisfy { ![1, 7].contains(cal.component(.weekday, from: $0.start)) } && cal.component(.weekday, from: weekend[0].start) == 2, "Freie Zeiten: nie am Wochenende, ab Samstag der nächste Montag")
+        let late = FreeSlots.find(busy: [], from: iso(2026, 11, 2, 15, 10, cal.timeZone), calendar: cal, options: FreeSlots.Options())
+        check(late.first.map { $0.start >= iso(2026, 11, 2, 17, 10, cal.timeZone) || !cal.isDate($0.start, inSameDayAs: monday) } == true, "Freie Zeiten: frühestens in zwei Stunden")
+        check(FreeSlots.merge([b(2, 9, 0, 10, 0), b(2, 9, 30, 11, 0), b(2, 12, 0, 13, 0)]).count == 2, "Freie Zeiten: überlappende Termine werden vereinigt")
+        let text = FreeSlots.describe(DateInterval(start: iso(2026, 11, 3, 10, 0, cal.timeZone), duration: 3600))
+        check(text.contains("10:00") && text.contains("11:00") && text.hasSuffix("Uhr"), "Freie Zeiten: Beschreibung (\(text))")
+        check(Engine.mentionsScheduling("Können wir einen Termin vereinbaren?") && Engine.mentionsScheduling("Do you have availability next week?") && !Engine.mentionsScheduling("Danke für die Rechnung."),
+              "Freie Zeiten: Mail fragt nach einem Termin")
+        check(ClaudeClient.slotsSection([]).isEmpty && ClaudeClient.slotsSection(["Dienstag, 4. November, 10:00–11:00 Uhr"]).contains("- Dienstag, 4. November"), "Freie Zeiten: Abschnitt im Prompt")
+
+        // Kontakte
+        check(ContactsDirectory.displayName(given: "Anna", family: "Weber", nickname: "", organization: "Firma") == "Anna Weber"
+              && ContactsDirectory.displayName(given: "", family: "", nickname: "Chef", organization: "Firma") == "Chef"
+              && ContactsDirectory.displayName(given: "", family: "", nickname: "", organization: "Firma GmbH") == "Firma GmbH", "Kontakte: Anzeigename")
+        ContactsDirectory.shared.setNames(["anna@firma.example": "Anna Weber"])
+        check(ContactsDirectory.shared.name(for: "Anna@Firma.Example") == "Anna Weber" && ContactsDirectory.shared.name(for: "x@y.de") == nil, "Kontakte: Suche ohne Groß-/Kleinschreibung")
+        ContactsDirectory.shared.setNames([:])
+        let manual = VIPEntry(name: "Chefin", match: "chefin@firma.example")
+        let old = VIPEntry(name: "Alt", match: "alt@x.de", fromContacts: true)
+        let merged = VIPSync.merge(existing: [manual, old], members: [("Anna Weber", ["anna@firma.example", "anna@privat.example"]), ("Chefin", ["chefin@firma.example"])])
+        check(merged.count == 3 && merged.contains { $0.match == "anna@firma.example" && $0.fromContacts } && !merged.contains { $0.match == "alt@x.de" } && merged.filter { $0.match == "chefin@firma.example" }.count == 1,
+              "Kontakte: VIP-Abgleich ersetzt nur Einträge aus Kontakten, doppelte werden vermieden")
+        let oldVIP = try JSONDecoder().decode([VIPEntry].self, from: Data(#"[{"id":"8D1B2E0A-0000-4000-8000-000000000002","name":"X","match":"x@y.de"}]"#.utf8))
+        check(oldVIP.count == 1 && !oldVIP[0].fromContacts, "Kontakte: ältere VIP-Listen bleiben lesbar")
+
+        // Mitteilungen
+        check(NotificationAction.parse("REPLY") == .reply && NotificationAction.parse("SNOOZE") == .snooze && NotificationAction.parse("DONE") == .done && NotificationAction.parse("irgendwas") == .open, "Mitteilungen: Knöpfe werden zugeordnet, Antippen öffnet")
+        check(NotificationAction.category.actions.map(\.identifier) == ["REPLY", "SNOOZE", "DONE"], "Mitteilungen: drei Knöpfe")
     }
 }

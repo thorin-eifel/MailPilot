@@ -18,8 +18,8 @@ extension MailBridge {
     }()
 
     /// Listet die Anhänge; mit `saveTo` werden PDFs (bis 12 MB) dort abgelegt.
-    func attachments(account: String, mailbox: String, id: Int, messageId: String, saveTo dir: URL?) async throws -> [AttachmentInfo] {
-        var params: [String: Any] = ["account": account, "mailbox": mailbox, "id": id, "messageId": messageId, "maxBytes": 12_000_000]
+    func attachments(account: String, mailbox: String, id: Int, messageId: String, saveTo dir: URL?, ics: Bool = false) async throws -> [AttachmentInfo] {
+        var params: [String: Any] = ["account": account, "mailbox": mailbox, "id": id, "messageId": messageId, "maxBytes": 12_000_000, "ics": ics]
         if let dir { params["save"] = true; params["dir"] = dir.path }
         let out = try await run(Self.attachScript, params)
         return try JSONDecoder().decode([AttachmentInfo].self, from: Data(out.utf8))
@@ -63,7 +63,8 @@ extension MailBridge {
         try { item.size = a.fileSize(); } catch (e) {}
         try { item.downloaded = a.downloaded(); } catch (e) {}
         const isPdf = /pdf/i.test(item.mimeType || '') || /\.pdf$/i.test(item.name || '');
-        if (p.save && isPdf && item.size < p.maxBytes) {
+        const isIcs = p.ics && (/calendar/i.test(item.mimeType || '') || /\.ics$/i.test(item.name || ''));
+        if (p.save && (isPdf || isIcs) && item.size < (isIcs ? 2000000 : p.maxBytes)) {
           try {
             const path = p.dir + '/' + out.length + '-' + (item.name || 'anhang.pdf').replace(/[\/:]/g, '_');
             Mail.save(a, { in: Path(path) });

@@ -125,3 +125,71 @@ extension Engine {
         notify(title: "Dein Wochenbericht ist da", body: "Wo du säumig bist, worauf du wartest und was sich verändert hat.", id: "weekly")
     }
 }
+
+/// Kontakte: Namen und VIP-Gruppe
+extension Engine {
+    /// Name des Absenders: aus der Mail, sonst aus den Kontakten, sonst die Adresse.
+    func displayName(_ m: StoredMessage) -> String {
+        if let n = MailAddress.parse(m.sender).name { return n }
+        return (settings.useContactNames ? ContactsDirectory.shared.name(for: m.senderEmail) : nil) ?? m.senderEmail
+    }
+
+    /// Name zu einer Adresse wie `Anna <anna@x.de>`.
+    func contactName(_ raw: String) -> String {
+        let p = MailAddress.parse(raw)
+        if let n = p.name { return n }
+        return (settings.useContactNames ? ContactsDirectory.shared.name(for: p.email) : nil) ?? p.email
+    }
+
+    func requestContactsAccess() async {
+        let ok = await ContactsDirectory.shared.requestAccess()
+        if ok { await syncContacts() }
+        objectWillChange.send()
+    }
+
+    /// Liest die Kontakte und gleicht die VIP-Gruppe ab.
+    func syncContacts() async {
+        guard ContactsDirectory.shared.isAuthorized else { return }
+        do { try ContactsDirectory.shared.reload() } catch { lastError = "Kontakte konnten nicht gelesen werden: \(error.localizedDescription)"; return }
+        if !settings.vipContactGroup.isEmpty {
+            let members = ContactsDirectory.shared.members(ofGroup: settings.vipContactGroup)
+            let merged = VIPSync.merge(existing: settings.vips, members: members)
+            if merged != settings.vips { settings.vips = merged }
+            status = "Kontakte abgeglichen: \(members.count) Personen in „\(settings.vipContactGroup)“"
+        }
+        objectWillChange.send()
+    }
+}
+
+/// Freie Zeiten für Antwortentwürfe
+extension Engine {
+    nonisolated private static let schedulingWords = ["termin", "treffen", "meeting", "besprechung", "call", "telefonat", "gespräch", "verfügbar", "wann hast", "wann passt",
+                                          "zeit für", "appointment", "schedule", "availab", "catch up", "kennenlernen", "rückruf", "vorbeikommen"]
+
+    /// Hat die letzte eingehende Mail mit einer Terminabsprache zu tun?
+    nonisolated static func mentionsScheduling(_ text: String) -> Bool {
+        let t = text.lowercased()
+        return schedulingWords.contains { t.contains($0) }
+    }
+
+    /// Freie Zeiten als Text („Dienstag, 4. November, 10:00–11:00 Uhr“) – nur wenn die Mail eine Terminabsprache nahelegt oder `force`.
+    func freeSlotTexts(for msgs: [StoredMessage], force: Bool) -> [String] {
+        guard settings.useFreeSlots, CalendarAvailability.shared.isAuthorized else { return [] }
+        if !force {
+            guard let last = msgs.last(where: { !$0.isFromMe }), Self.mentionsScheduling(last.subject + " " + last.content) else { return [] }
+        }
+        let now = Date()
+        let end = Calendar.current.date(byAdding: .day, value: 12, to: now) ?? now
+        let busy = CalendarAvailability.shared.busy(from: now, to: end, calendarIDs: settings.availabilityCalendars)
+        var o = FreeSlots.Options()
+        o.workStartHour = settings.workStartHour
+        o.workEndHour = max(settings.workEndHour, settings.workStartHour + 1)
+        o.minutes = settings.slotMinutes
+        return FreeSlots.find(busy: busy, from: now, options: o).map { FreeSlots.describe($0) }
+    }
+
+    func requestCalendarAccess() async {
+        _ = await CalendarAvailability.shared.requestAccess()
+        objectWillChange.send()
+    }
+}

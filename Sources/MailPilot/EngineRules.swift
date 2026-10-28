@@ -23,7 +23,9 @@ extension Engine {
             setMoveStatus(account, verdict, detail: verdict == "ok" ? nil : "Bereits einsortierte Mails sind im Zielordner nicht zurücklesbar")
             return verdict == "ok" ? .allowed : .blocked
         }
-        return .canary
+        // Ohne Vorgeschichte wird nur nach ausdrücklicher Erlaubnis probeweise verschoben. Manche Konten (z. B. Exchange)
+        // nehmen Mails in neu angelegte Ordner an, zeigen sie aber nicht an – dort würde schon die Probe eine Mail „verstecken“.
+        return settings.probeMoveAccounts.contains(account) ? .canary : .blocked
     }
 
     func setMoveStatus(_ account: String, _ value: String?, detail: String?) {

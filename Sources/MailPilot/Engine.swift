@@ -34,12 +34,20 @@ final class Engine: ObservableObject {
     /// Verfügbare Erinnerungslisten und Kalender (für die Auswahl der Fristen-Ziele).
     @Published var reminderLists: [String] = []
     @Published var calendars: [CalendarInfo] = []
+    @Published private(set) var invites: [Invite] = []
     @Published private(set) var weeklyReport: WeeklyReport?
     @Published var weeklyBusy = false
     @Published private(set) var invoices: [Invoice] = []
     /// Noch nicht ausgelesene Mails der Rechnungs-Kategorie.
     @Published private(set) var invoiceQueue = 0
     @Published var invoiceBusy = false
+    /// Navigation von außen (Tastenkürzel, Mitteilungen): Abschnitt der Seitenleiste bzw. Gespräch, das gezeigt werden soll.
+    @Published var requestedSidebar: SidebarItem?
+    @Published var focusThread: String?
+    /// Gespräch, das gerade geöffnet ist (für Tastenkürzel).
+    @Published var selectedThreadKey: String?
+    /// Öffnet das Dashboard-Fenster (wird von der Menüleiste gesetzt).
+    var openDashboard: (() -> Void)?
     @Published var styleBusy = false
     @Published private(set) var planLimits: PlanLimits?
     @Published private(set) var usageToday = UsageSummary()
@@ -85,6 +93,11 @@ final class Engine: ObservableObject {
 
     var claude: ClaudeClient? {
         ClaudeClient.locate(preferred: settings.claudePath).map { ClaudeClient(executable: $0, model: settings.model) }
+    }
+
+    /// Günstigeres Modell für die Massenanalyse älterer Mails.
+    var claudeBulk: ClaudeClient? {
+        ClaudeClient.locate(preferred: settings.claudePath).map { ClaudeClient(executable: $0, model: settings.modelBulk.isEmpty ? settings.model : settings.modelBulk) }
     }
 
     /// Für Aufrufe, die der Nutzer per Knopfdruck auslöst: läuft auch bei erreichter Pause-Grenze.
@@ -152,6 +165,7 @@ final class Engine: ObservableObject {
         activity = (try? store.activity()) ?? []
         suggestions = (try? store.openSuggestions()) ?? []
         weeklyReport = store.latestReport()
+        invites = (try? store.invites(accounts: enabledAccountNames)) ?? []
         invoices = (try? store.invoices(accounts: enabledAccountNames)) ?? []
         invoiceQueue = settings.extractInvoices ? store.invoiceQueueCount(category: settings.invoiceCategory, accounts: enabledAccountNames) : 0
         moveStatus = Dictionary(uniqueKeysWithValues: accounts.compactMap { a in
@@ -203,6 +217,18 @@ final class Engine: ObservableObject {
                     paid: true, status: "ok", error: nil),
         ]
         invoiceQueue = 7
+        let nextTue = Calendar.current.nextDate(after: Date(), matching: DateComponents(hour: 10, minute: 0, weekday: 3), matchingPolicy: .nextTime) ?? Date()
+        invites = [
+            Invite(messageId: "x1", event: InviteEvent(uid: "u1", summary: "Projekt-Kickoff Server-Migration", start: nextTue, end: nextTue.addingTimeInterval(5400), allDay: false,
+                                                       location: "Besprechungsraum 2, Trier", organizer: "Anna Weber", method: "REQUEST", cancelled: false, recurring: false, notes: ""),
+                   account: "iCloud", subject: "Einladung: Projekt-Kickoff", status: "new", mailDate: Date()),
+            Invite(messageId: "x2", event: InviteEvent(uid: "u2", summary: "Wöchentliches Team-Meeting", start: nextTue.addingTimeInterval(86400), end: nextTue.addingTimeInterval(86400 + 1800),
+                                                       allDay: false, location: "Teams", organizer: "Karl-Heinz Hartmann", method: "REQUEST", cancelled: false, recurring: true, notes: ""),
+                   account: "iCloud", subject: "Einladung: Team-Meeting", status: "new", mailDate: Date()),
+            Invite(messageId: "x3", event: InviteEvent(uid: "u3", summary: "Webinar Informationssicherheit", start: nextTue.addingTimeInterval(3 * 86400), end: nextTue.addingTimeInterval(3 * 86400 + 3600),
+                                                       allDay: false, location: "", organizer: "Reisdorf", method: "CANCEL", cancelled: true, recurring: false, notes: ""),
+                   account: "iCloud", subject: "Abgesagt: Webinar", status: "new", mailDate: Date()),
+        ]
         planLimits = PlanLimits(fiveHour: PlanWindow(utilization: 0.72, resetsAt: Date().addingTimeInterval(2 * 3600), status: "allowed"),
                                 sevenDay: PlanWindow(utilization: 0.69, resetsAt: Date().addingTimeInterval(3 * 86400), status: "allowed"), updatedAt: Date())
         usageToday = UsageSummary(calls: 38, failures: 1, inputTokens: 61_400, outputTokens: 9_800, cacheReadTokens: 120_000, costUSD: 1.42, avgSeconds: 6.3)
@@ -244,6 +270,7 @@ final class Engine: ObservableObject {
             }
             // Verschiebe-Schutz früh auswerten (nur lesend), damit die Konten sofort ihren Status zeigen.
             for account in enabledAccountNames { _ = await moveGate(account) }
+            await syncContacts()
             reload()
             if initialComplete { schedule() } else { await runInitialScan() }
         }
@@ -334,8 +361,11 @@ final class Engine: ObservableObject {
     private func fetchInitial(accounts: [String]) async throws -> FetchResult {
         let known = try store.knownMessageIds(since: .distantPast)
         let sentSince = Date().addingTimeInterval(-Double(max(settings.lookbackDays, 30)) * 86400)
+        // Neueste zuerst, und auf Wunsch nur die letzten X Tage: spart Claude-Aufrufe, das Wichtige kommt zuerst dran.
+        let minDate = settings.initialScanDays > 0 ? Date().addingTimeInterval(-Double(settings.initialScanDays) * 86400) : nil
         return try await bridge.fetch(since: Date(timeIntervalSince1970: 0), sentSince: sentSince, accounts: accounts,
-                                      known: known, maxNew: 150, includeSent: settings.includeSent, contentLimit: 3000)
+                                      known: known, maxNew: 150, includeSent: settings.includeSent, contentLimit: 3000,
+                                      newestFirst: true, minDate: minDate)
     }
 
     /// Konten, auf die sich die Fortschrittsanzeige des laufenden Erstscans bezieht.
@@ -373,6 +403,7 @@ final class Engine: ObservableObject {
             await generateFollowUps()
             await syncDeadlines()
             await extractInvoices(limit: 6)
+            await scanInvites(limit: 5)
             await learnStyleIfNeeded()
             await weeklyReportIfDue()
             await syncReadStateIfDue()
@@ -414,6 +445,11 @@ final class Engine: ObservableObject {
             let key = try store.resolveThreadKey(for: m)
             try store.setThreadKey(key, for: m.messageId)
             if routeIfPrivate(m, key: key) { continue }
+            if let v = localVerdict(m, key: key) {
+                // Ohne Claude einsortiert: Header-Vorfilter oder Absender-Gedächtnis.
+                try? record(m, key: key, analysis: Prefilter.analysis(for: m, v), source: v.source)
+                continue
+            }
             keyed.append((m, key))
         }
 
@@ -422,8 +458,10 @@ final class Engine: ObservableObject {
         let recent = keyed.filter { $0.0.date >= cutoff }
 
         let chunks = stride(from: 0, to: old.count, by: 10).map { Array(old[$0..<min($0 + 10, old.count)]) }
+        // Ältere Mails im Paket mit dem günstigeren Modell.
+        let bulk = claudeBulk ?? claude
         await runConcurrently(chunks, limit: 3) { chunk in
-            await self.analyzeChunk(chunk, claude: claude)
+            await self.analyzeChunk(chunk, claude: bulk)
         }
         if let abortError { throw abortError }
 
@@ -468,7 +506,8 @@ final class Engine: ObservableObject {
             let a = try await claude.analyze(message: m, thread: existing, history: history,
                                              settings: settings, myAddresses: myAddresses,
                                              hints: Learner.hints(for: m, store: store, settings: settings),
-                                             styleGuide: settings.useStyleProfile ? styleProfile : "")
+                                             styleGuide: settings.useStyleProfile ? styleProfile : "",
+                                             freeSlots: freeSlotTexts(for: history + [m], force: false))
             try record(m, key: key, analysis: a)
         } catch {
             handle(error, for: [m])
@@ -488,18 +527,18 @@ final class Engine: ObservableObject {
     }
 
     /// Speichert das Analyse-Ergebnis an der Nachricht und aktualisiert das Gespräch.
-    private func record(_ m: StoredMessage, key: String, analysis claude: MessageAnalysis) throws {
+    private func record(_ m: StoredMessage, key: String, analysis claude: MessageAnalysis, source: String = "Claude") throws {
         // Eigene Regeln und VIP-Liste haben Vorrang vor Claudes Einschätzung.
         let effect = RuleEngine.evaluate(m, settings: settings)
         var a = claude
         if let c = effect.category { a.category = c }
         if let p = effect.priority { a.priority = p }
         try store.saveAnalysis(of: m.messageId, threadKey: key, category: m.isFromMe ? nil : a.category,
-                               priority: a.priority, summary: a.summary, decidedBy: m.isFromMe ? nil : (effect.decidedBy ?? "Claude"))
+                               priority: a.priority, summary: a.summary, decidedBy: m.isFromMe ? nil : (effect.decidedBy ?? source))
 
         let existing = try store.thread(key)
         let isLatest = existing.map { m.date >= $0.lastDate } ?? true
-        let counterpart = m.isFromMe ? (m.recipients.first.map { MailAddress.parse($0).name ?? MailAddress.parse($0).email } ?? "") : m.senderName
+        let counterpart = m.isFromMe ? (m.recipients.first.map { contactName($0) } ?? "") : displayName(m)
         var t = existing ?? MailThread(
             threadKey: key, subject: m.subject, normSubject: MailAddress.normalizeSubject(m.subject),
             counterpart: counterpart, lastDate: m.date, lastFromMe: m.isFromMe, messageCount: 0,
@@ -538,9 +577,9 @@ final class Engine: ObservableObject {
         let fresh = m.date > Date().addingTimeInterval(-Double(settings.lookbackDays) * 86400)
         if initialComplete, fresh, !m.isFromMe {
             if effect.vip, settings.vipNotify {
-                notify(title: "VIP: \(m.senderName)", body: "\(m.subject)\n\(a.summary)", id: m.messageId)
+                notify(title: "VIP: \(m.senderName)", body: "\(m.subject)\n\(a.summary)", id: m.messageId, thread: key)
             } else if a.priority == .high, a.needs_reply {
-                notify(title: "Wichtig: \(m.senderName)", body: "\(m.subject)\n\(a.summary)", id: m.messageId)
+                notify(title: "Wichtig: \(m.senderName)", body: "\(m.subject)\n\(a.summary)", id: m.messageId, thread: key)
             }
         }
     }
@@ -704,9 +743,10 @@ final class Engine: ObservableObject {
     }
 
     /// Öffnet in Mail ein Antwortfenster mit dem Entwurf. Gesendet wird ausschließlich vom Nutzer.
-    func openReply(for thread: MailThread, text: String) async {
+    /// Öffnet ein Antwortfenster in Mail – oder legt die Antwort mit `save` still als Entwurf ab.
+    func openReply(for thread: MailThread, text: String, save: Bool = false) async {
         if thread.draftKind == "followup" || thread.isFollowUpCase {
-            await openFollowUp(for: thread, text: text)
+            await openFollowUp(for: thread, text: text, save: save)
             return
         }
         let msgs = messages(in: thread)
@@ -716,13 +756,14 @@ final class Engine: ObservableObject {
         }
         do {
             let loc = MailBridge.Location(account: target.account, mailbox: target.mailbox, mailId: target.mailId)
-            try await bridge.openReply(messageId: target.messageId, at: loc, text: text, replyAll: target.recipients.count > 1)
+            try await bridge.openReply(messageId: target.messageId, at: loc, text: text, replyAll: target.recipients.count > 1, save: save)
+            if save { status = "Antwort als Entwurf in Mail abgelegt – dort noch prüfen und senden." }
         } catch {
             lastError = error.localizedDescription
         }
     }
 
-    func redraft(_ thread: MailThread, hint: String, interactive: Bool = true) async -> String? {
+    func redraft(_ thread: MailThread, hint: String, interactive: Bool = true, forceSlots: Bool = false) async -> String? {
         if thread.isPrivate {
             lastError = "Dieses Gespräch ist vom Datenschutz ausgenommen – Claude erhält keinen Inhalt."
             return nil
@@ -732,8 +773,9 @@ final class Engine: ObservableObject {
             let msgs = messages(in: thread)
             let followUp = thread.isFollowUpCase
             let style = styleContext(for: thread, messages: msgs, examples: true)
+            let slots = followUp ? [] : freeSlotTexts(for: msgs, force: forceSlots)
             let text = try await claude.redraft(thread: thread, messages: msgs, hint: hint, settings: settings, followUp: followUp,
-                                                styleGuide: style.guide, examples: style.examples)
+                                                styleGuide: style.guide, examples: style.examples, freeSlots: slots)
             var t = thread
             t.draft = text
             if followUp {
@@ -797,7 +839,7 @@ final class Engine: ObservableObject {
 
     private func checkFollowUps() {
         for var t in overdue where !t.followupNotified {
-            notify(title: "Keine Antwort seit \(settings.followUpDays)+ Tagen", body: "\(t.subject) – \(t.counterpart)", id: "followup-\(t.threadKey)")
+            notify(title: "Keine Antwort seit \(settings.followUpDays)+ Tagen", body: "\(t.subject) – \(t.counterpart)", id: "followup-\(t.threadKey)", thread: t.threadKey)
             t.followupNotified = true
             try? store.upsert(t)
         }
@@ -807,14 +849,21 @@ final class Engine: ObservableObject {
 
     private func requestNotificationPermission() {
         guard Bundle.main.bundleIdentifier != nil else { return }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        let center = UNUserNotificationCenter.current()
+        center.setNotificationCategories([NotificationAction.category])
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    func notify(title: String, body: String, id: String) {
+    /// Mitteilung; mit `thread` trägt sie die Knöpfe „Antworten“, „Zurückstellen“ und „Erledigt“.
+    func notify(title: String, body: String, id: String, thread: String? = nil) {
         guard settings.notifications, Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
+        if let thread {
+            content.categoryIdentifier = NotificationAction.categoryID
+            content.userInfo = ["threadKey": thread]
+        }
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
     }
 

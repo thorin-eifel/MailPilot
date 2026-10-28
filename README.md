@@ -18,6 +18,13 @@ Menüleisten-App mit Dashboard, die Apple Mail mit Claude automatisiert:
 - **Newsletter abbestellen** – erkennt Absender, deren Mails du nie öffnest, und meldet sie auf deinen Klick ab (Ein-Klick nach RFC 8058, Link oder vorbereitete E-Mail). Unsichere Ziele (http, IP-Adressen, lokale Hosts) werden nie angesprochen.
 - **Rückgängig für Flaggen** – MailPilot merkt sich den Zustand vor dem Markieren; einzeln oder für alle zurücknehmbar.
 - **Sicherung und Export** – tägliche Sicherung der Datenbank (7 behalten), Wiederherstellung beim nächsten Start (mit Sicherheitskopie des alten Stands), Export als JSON (Mailtexte nur auf Wunsch, vertrauliche nie) und Gespräche als CSV, Einstellungen übertragbar.
+- **Weniger Claude-Aufrufe** – Newsletter und Systemmeldungen erkennt MailPilot an den Mail-Headern (`List-Unsubscribe`, `Auto-Submitted`, `Precedence`), wiederkehrende Absender an ihrer Vorgeschichte; Rechnungen, Bestellungen, Termine und laufende Gespräche gehen immer an Claude. Ältere Mails laufen im Paket mit Haiku, der Erstscan beginnt mit den neuesten und kann auf die letzten X Tage beschränkt werden. Regeln können Mails „ohne Claude“ einordnen.
+- **Einladungen → Kalender** – Kalenderanhänge (.ics) aus Mails werden gelesen (Zeitzonen, ganztägig, Absagen, Änderungen) und auf Klick oder automatisch in den gewählten Kalender eingetragen; Überschneidungen werden angezeigt.
+- **Freie Zeiten in Entwürfen** – fragt eine Mail nach einem Termin, nennt der Entwurf freie Zeiten aus dem Kalender (nur Zeiträume gehen an Claude, nie Titel oder Orte).
+- **Kontakte** – Namen aus der Kontakte-App und eine Kontaktgruppe als VIP-Liste.
+- **Mitteilungen mit Knöpfen** („Antworten“, „Morgen früh wieder zeigen“, „Erledigt“) und **Tastenkürzel** (⌘F Suche, ⌘J / ⇧⌘J Zurückstellen, ⌘E erledigt, ⌘R antworten, ⌘0–4 Bereiche).
+- **Entwurf direkt in „Entwürfe“** – legt Antwort oder Nachfrage still im Entwürfe-Ordner des Mail-Kontos ab; gesendet wird nichts.
+- **Verschieben nur nach Erlaubnis** – In Konten ohne nachgewiesene, lesbare Zielordner (z. B. Exchange) wird nie verschoben; eine Probe-Verschiebung muss ausdrücklich erlaubt werden.
 - **Gesprächs-Tracking** – Mails werden über `References`/`In-Reply-To` (oder Betreff + Gegenseite) zu Gesprächen gruppiert. Pro Gespräch pflegt Claude Status (*Antwort nötig*, *Wartet auf Antwort*, *Info*, *Erledigt*), Zusammenfassung, nächsten Schritt und Frist.
 - **Follow-ups** – Gespräche, in denen du seit X Tagen auf Antwort wartest, werden als überfällig markiert und gemeldet.
 - **Tägliches Briefing** – ab einer einstellbaren Uhrzeit fasst Claude den Tag zusammen.

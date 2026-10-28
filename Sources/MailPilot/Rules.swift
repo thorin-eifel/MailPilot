@@ -61,6 +61,8 @@ struct UserRule: Codable, Hashable, Identifiable {
     var keepInInbox = false
     /// Aus Korrekturen vorgeschlagen und übernommen.
     var learned = false
+    /// Mails, die diese Regel trifft, ohne Claude einordnen (spart Aufrufe; braucht eine Kategorie).
+    var skipClaude = false
 
     var hasAction: Bool {
         category != nil || !(folder ?? "").isEmpty || priority != nil || flag != nil || keepInInbox
@@ -73,6 +75,20 @@ struct VIPEntry: Codable, Hashable, Identifiable {
     var name = ""
     /// E-Mail-Adresse oder Domain (`firma.de` bzw. `@firma.de`).
     var match = ""
+    /// Stammt aus einer Kontaktgruppe und wird beim Abgleich ersetzt.
+    var fromContacts = false
+
+    init(id: UUID = UUID(), name: String = "", match: String = "", fromContacts: Bool = false) {
+        self.id = id; self.name = name; self.match = match; self.fromContacts = fromContacts
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        match = try c.decodeIfPresent(String.self, forKey: .match) ?? ""
+        fromContacts = try c.decodeIfPresent(Bool.self, forKey: .fromContacts) ?? false
+    }
 
     func matches(_ email: String) -> Bool {
         let want = match.trimmingCharacters(in: .whitespaces).lowercased()
@@ -278,5 +294,25 @@ enum MoveGate {
         guard let listing = try? await bridge.folderContents(Array(refs)) else { return nil }
         let found = sample.filter { listing[.init(account: account, path: $0.mailbox)]?.contains($0.messageId) == true }.count
         return decide(sample: sample.count, found: found)
+    }
+}
+
+extension UserRule {
+    /// Tolerantes Lesen: Regeln aus älteren Versionen (ohne neuere Felder) bleiben erhalten.
+    init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? id
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? name
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? enabled
+        matchAll = try c.decodeIfPresent(Bool.self, forKey: .matchAll) ?? matchAll
+        conditions = try c.decodeIfPresent([RuleCondition].self, forKey: .conditions) ?? conditions
+        category = try c.decodeIfPresent(String.self, forKey: .category)
+        folder = try c.decodeIfPresent(String.self, forKey: .folder)
+        priority = try c.decodeIfPresent(Priority.self, forKey: .priority)
+        flag = try c.decodeIfPresent(FlagColor.self, forKey: .flag)
+        keepInInbox = try c.decodeIfPresent(Bool.self, forKey: .keepInInbox) ?? keepInInbox
+        learned = try c.decodeIfPresent(Bool.self, forKey: .learned) ?? learned
+        skipClaude = try c.decodeIfPresent(Bool.self, forKey: .skipClaude) ?? skipClaude
     }
 }

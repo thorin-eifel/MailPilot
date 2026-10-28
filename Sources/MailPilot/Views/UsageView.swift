@@ -23,6 +23,7 @@ struct UsageView: View {
                     SummaryTile(title: "Letzte 7 Tage", symbol: "calendar", summary: week)
                 }
                 chartCard
+                savingsCard
                 guardCard
             }
             .padding(24)
@@ -112,9 +113,26 @@ struct UsageView: View {
         .ctwCard()
     }
 
+    private var savingsCard: some View {
+        let since = Calendar.current.date(byAdding: .day, value: -6, to: Calendar.current.startOfDay(for: Date())) ?? Date()
+        let local = engine.store.locallyClassifiedCount(since: since)
+        let all = engine.store.classifiedCount(since: since)
+        return VStack(alignment: .leading, spacing: 8) {
+            Eyebrow(text: "Ohne Claude", number: "03")
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(local)").font(.system(size: 26, weight: .bold, design: .rounded)).monospacedDigit().foregroundStyle(CTW.ink)
+                Text(all > 0 ? "von \(all) Mails der letzten 7 Tage (\(Int((Double(local) / Double(all) * 100).rounded())) %) ohne Claude einsortiert" : "Mails ohne Claude einsortiert")
+                    .foregroundStyle(CTW.muted)
+            }
+            Text("Newsletter und Systemmeldungen erkennt MailPilot an den Mail-Headern, wiederkehrende Absender an ihrer Vorgeschichte. Rechnungen, Bestellungen, Termine und laufende Gespräche gehen immer an Claude.")
+                .font(.caption).foregroundStyle(CTW.muted)
+        }
+        .ctwCard()
+    }
+
     private var guardCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Eyebrow(text: "Schutz", number: "03")
+            Eyebrow(text: "Schutz", number: "04")
             Toggle("Automatische Claude-Arbeit pausieren, wenn das Limit fast erreicht ist", isOn: $engine.settings.limitGuardEnabled)
                 .toggleStyle(.switch)
             if engine.settings.limitGuardEnabled {

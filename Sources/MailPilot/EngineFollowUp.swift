@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 
 /// Zeitpunkte für „Zurückstellen“.
 enum SnoozeOption: String, CaseIterable, Identifiable {
@@ -61,7 +62,7 @@ extension Engine {
         for var t in due {
             t.snoozedUntil = nil
             try? store.upsert(t)
-            notify(title: "Wieder da: \(t.subject)", body: t.nextStep.isEmpty ? t.counterpart : "\(t.counterpart) · \(t.nextStep)", id: "snooze-\(t.threadKey)")
+            notify(title: "Wieder da: \(t.subject)", body: t.nextStep.isEmpty ? t.counterpart : "\(t.counterpart) · \(t.nextStep)", id: "snooze-\(t.threadKey)", thread: t.threadKey)
         }
         reload()
     }
@@ -101,12 +102,12 @@ extension Engine {
         for t in FollowUp.candidates(threads, followUpDays: settings.followUpDays).prefix(limit) {
             status = "Nachfass-Entwurf: \(t.subject.prefix(40))"
             guard await redraft(t, hint: "", interactive: false) != nil else { break }
-            notify(title: "Nachfass-Entwurf bereit", body: "\(t.subject) – \(t.counterpart)", id: "fu-draft-\(t.threadKey)")
+            notify(title: "Nachfass-Entwurf bereit", body: "\(t.subject) – \(t.counterpart)", id: "fu-draft-\(t.threadKey)", thread: t.threadKey)
         }
     }
 
     /// Öffnet ein neues Nachrichtenfenster an die Empfänger meiner letzten Nachricht. Gesendet wird nichts.
-    func openFollowUp(for thread: MailThread, text: String) async {
+    func openFollowUp(for thread: MailThread, text: String, save: Bool = false) async {
         guard let mine = messages(in: thread).last(where: { $0.isFromMe }) else {
             lastError = "Keine gesendete Nachricht in diesem Gespräch gefunden."
             return
@@ -123,7 +124,8 @@ extension Engine {
         }
         do {
             try await bridge.compose(sender: mine.sender, to: to, subject: FollowUp.subject(for: thread.subject),
-                                     content: FollowUp.body(text: text, quoting: mine))
+                                     content: FollowUp.body(text: text, quoting: mine), save: save)
+            if save { status = "Nachfrage als Entwurf in Mail abgelegt – dort noch prüfen und senden." }
         } catch {
             lastError = error.localizedDescription
         }
@@ -138,5 +140,61 @@ extension Engine {
         c.interactive = true
         do { _ = try await c.tagged("Limit-Abfrage").ping() } catch { lastError = error.localizedDescription }
         refreshUsage()
+    }
+}
+
+/// Knöpfe an Mitteilungen und Tastenkürzel: Aktionen auf dem geöffneten bzw. angetippten Gespräch.
+enum NotificationAction: String {
+    case open = "OPEN", reply = "REPLY", snooze = "SNOOZE", done = "DONE"
+
+    static let categoryID = "THREAD"
+
+    static var category: UNNotificationCategory {
+        UNNotificationCategory(identifier: categoryID, actions: [
+            UNNotificationAction(identifier: reply.rawValue, title: "Antworten", options: [.foreground]),
+            UNNotificationAction(identifier: snooze.rawValue, title: "Morgen früh wieder zeigen", options: []),
+            UNNotificationAction(identifier: done.rawValue, title: "Erledigt", options: []),
+        ], intentIdentifiers: [], options: [])
+    }
+
+    /// Antippen der Mitteilung selbst entspricht „Öffnen“.
+    static func parse(_ identifier: String) -> NotificationAction {
+        NotificationAction(rawValue: identifier) ?? .open
+    }
+}
+
+extension Engine {
+    var selectedThread: MailThread? { selectedThreadKey.flatMap { k in threads.first { $0.threadKey == k } } }
+
+    func handle(_ action: NotificationAction, threadKey: String) async {
+        guard let t = threads.first(where: { $0.threadKey == threadKey }) else { return }
+        switch action {
+        case .open:
+            focusThread = threadKey
+            openDashboard?()
+        case .reply:
+            focusThread = threadKey
+            await openReply(for: t, text: t.draft ?? "")
+        case .snooze:
+            snooze(t, until: SnoozeOption.tomorrow.date(from: Date()))
+        case .done:
+            setStatus(.done, for: t)
+        }
+    }
+
+    func snoozeSelected(_ option: SnoozeOption) {
+        guard let t = selectedThread, let date = option.date(from: Date()) else { return }
+        snooze(t, until: date)
+        status = "„\(t.subject.prefix(40))“ zurückgestellt bis \(date.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    func markSelectedDone() {
+        guard let t = selectedThread else { return }
+        setStatus(.done, for: t)
+    }
+
+    func replySelected() async {
+        guard let t = selectedThread else { return }
+        await openReply(for: t, text: t.draft ?? "")
     }
 }

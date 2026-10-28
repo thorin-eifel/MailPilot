@@ -132,6 +132,27 @@ struct AppSettings: Codable, Equatable {
     /// Entwürfe im gelernten Stil des Nutzers schreiben.
     var useStyleProfile = true
     /// Tägliche Sicherung der Datenbank; die letzten `backupKeep` bleiben.
+    /// Konten, in denen der Nutzer ausdrücklich erlaubt hat, per Probe-Mail zu testen, ob Verschieben funktioniert.
+    /// Ohne Erlaubnis wird in ungeprüften Konten nie verschoben – nur markiert.
+    var probeMoveAccounts: [String] = []
+    /// Offensichtlich automatische Mails (Newsletter, Systemmeldungen) ohne Claude einordnen.
+    var prefilterEnabled = true
+    /// Günstigeres Modell für die Massenanalyse älterer Mails.
+    var modelBulk = "haiku"
+    /// Erstscan: nur Mails der letzten X Tage (0 = alle).
+    var initialScanDays = 180
+    /// Namen aus der Kontakte-App verwenden, wenn die Mail keinen Namen enthält.
+    var useContactNames = true
+    /// Kontaktgruppe, deren Mitglieder automatisch auf die VIP-Liste kommen (leer = aus).
+    var vipContactGroup = ""
+    /// Freie Zeiten aus dem Kalender in Antwortentwürfen vorschlagen (nur Zeiten, keine Titel).
+    var useFreeSlots = true
+    var availabilityCalendars: [String] = []
+    var workStartHour = 9
+    var workEndHour = 17
+    var slotMinutes = 60
+    /// Einladungen aus Mails automatisch in den gewählten Kalender eintragen (sonst nur vorschlagen).
+    var autoAddInvites = false
     var autoBackup = true
     var backupKeep = 7
     var limitGuardEnabled = true
@@ -232,6 +253,18 @@ extension AppSettings {
         invoiceCategory = v(.invoiceCategory, invoiceCategory)
         privacyRules = v(.privacyRules, privacyRules)
         useStyleProfile = v(.useStyleProfile, useStyleProfile)
+        probeMoveAccounts = v(.probeMoveAccounts, probeMoveAccounts)
+        prefilterEnabled = v(.prefilterEnabled, prefilterEnabled)
+        modelBulk = v(.modelBulk, modelBulk)
+        initialScanDays = v(.initialScanDays, initialScanDays)
+        useContactNames = v(.useContactNames, useContactNames)
+        vipContactGroup = v(.vipContactGroup, vipContactGroup)
+        useFreeSlots = v(.useFreeSlots, useFreeSlots)
+        availabilityCalendars = v(.availabilityCalendars, availabilityCalendars)
+        workStartHour = v(.workStartHour, workStartHour)
+        workEndHour = v(.workEndHour, workEndHour)
+        slotMinutes = v(.slotMinutes, slotMinutes)
+        autoAddInvites = v(.autoAddInvites, autoAddInvites)
         autoBackup = v(.autoBackup, autoBackup)
         backupKeep = v(.backupKeep, backupKeep)
         limitGuardEnabled = v(.limitGuardEnabled, limitGuardEnabled)

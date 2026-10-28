@@ -291,6 +291,50 @@ enum FeatureSelfTest {
                     check(false, "Flaggen-Test: \(error.localizedDescription)")
                 }
             }
+            if args.contains("--prefilter") {
+                do {
+                    let accounts = try await bridge.listAccounts().map(\.name).filter { $0 != "Exchange" }
+                    let r = try await bridge.fetch(since: Date().addingTimeInterval(-3 * 86400), accounts: accounts, known: [], maxNew: 40, includeSent: false, contentLimit: 200)
+                    var flagCount: [String: Int] = [:], unsub = 0, decided = 0
+                    for m in r.messages {
+                        for f in (m.headerFlags ?? "").split(separator: " ") { flagCount[String(f), default: 0] += 1 }
+                        if m.unsubscribe != nil { unsub += 1 }
+                        var x = RulesSelfTest.msg(m.messageId, from: MailAddress.parse(m.sender).email, subject: m.subject)
+                        x.hdrFlags = m.headerFlags ?? ""; x.unsub = m.unsubscribe
+                        if Prefilter.verdict(for: x, settings: AppSettings(), history: [], hasCorrections: false, isVIP: false) != nil { decided += 1 }
+                    }
+                    print("Vorfilter an \(r.messages.count) echten Mails: Kennzeichen \(flagCount), \(unsub) mit Abmelde-Header, \(decided) würden ohne Claude einsortiert")
+                    check(!r.messages.isEmpty, "Vorfilter: Header echter Mails gelesen")
+                } catch {
+                    check(false, "Vorfilter-Test: \(error.localizedDescription)")
+                }
+            }
+            if args.contains("--invites") {
+                do {
+                    let store = try Store()
+                    let cand = try store.inviteCandidates(accounts: ["thorsten.schleicher@ctw-computer.de", "iCloud", "thorin.eifel@icloud.com"], since: Date().addingTimeInterval(-120 * 86400), limit: 40)
+                    var withIcs = 0, events = 0, tried = 0
+                    for m in cand where tried < 12 {
+                        tried += 1
+                        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mp-ics-\(UUID())", isDirectory: true)
+                        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                        defer { try? FileManager.default.removeItem(at: dir) }
+                        guard let infos = try? await bridge.attachments(account: m.account, mailbox: m.mailbox, id: m.mailId, messageId: m.messageId, saveTo: dir, ics: true) else { continue }
+                        for path in infos.compactMap(\.saved) where !path.lowercased().hasSuffix(".pdf") {
+                            guard let data = FileManager.default.contents(atPath: path), let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else { continue }
+                            let parsed = ICSParser.parse(text)
+                            if !parsed.isEmpty { withIcs += 1; events += parsed.count }
+                        }
+                    }
+                    print("Einladungen: \(cand.count) Kandidaten, \(tried) geprüft, \(withIcs) mit Kalenderanhang, \(events) Termine gelesen")
+                    check(tried > 0, "Einladungen: Kandidaten in echten Mails gefunden und Anhänge gelesen")
+                } catch {
+                    check(false, "Einladungs-Test: \(error.localizedDescription)")
+                }
+            }
+            if args.contains("--authstatus") {
+                print("Kontakte: \(ContactsDirectory.shared.statusText) | Kalender: \(CalendarAvailability.shared.statusText)")
+            }
             if args.contains("--compose") {
                 do {
                     let r = try await bridge.compose(sender: nil, to: ["test@example.invalid"], subject: "MailPilot-Test", content: "Testtext", visible: false)

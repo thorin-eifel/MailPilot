@@ -96,8 +96,18 @@ struct ThreadDetailView: View {
                             Image(systemName: "sparkles").foregroundStyle(CTW.accent)
                             TextField("Anweisung an Claude, z. B. „kürzer, Termin Dienstag vorschlagen“", text: $hint)
                                 .textFieldStyle(.roundedBorder)
-                                .onSubmit(redraft)
-                            Button(action: redraft) {
+                                .onSubmit { redraft() }
+                            if !thread.isFollowUpCase {
+                                Button { redraft(slots: true) } label: {
+                                    Label("Zeiten vorschlagen", systemImage: "calendar.badge.clock")
+                                }
+                                .buttonStyle(.ctwSecondary)
+                                .disabled(working || !CalendarAvailability.shared.isAuthorized || !engine.settings.useFreeSlots)
+                                .help(CalendarAvailability.shared.isAuthorized
+                                      ? "Schreibt den Entwurf neu und schlägt dabei freie Zeiten aus deinem Kalender vor"
+                                      : "Dafür braucht MailPilot Zugriff auf den Kalender (Einstellungen → Kalender & freie Zeiten)")
+                            }
+                            Button { redraft() } label: {
                                 Label(draft.isEmpty ? (thread.isFollowUpCase ? "Nachfass-Entwurf erstellen" : "Entwurf erstellen") : "Neu schreiben",
                                       systemImage: "wand.and.stars")
                             }
@@ -113,6 +123,15 @@ struct ThreadDetailView: View {
                             }
                             .buttonStyle(.ctwSecondary)
                             .disabled(draft == (thread.draft ?? ""))
+                            Button {
+                                engine.saveDraft(draft, for: thread)
+                                Task { await engine.openReply(for: thread, text: draft, save: true) }
+                            } label: {
+                                Label("In Entwürfe legen", systemImage: "tray.and.arrow.down")
+                            }
+                            .buttonStyle(.ctwSecondary)
+                            .disabled(draft.isEmpty)
+                            .help("Legt den Entwurf im Ordner „Entwürfe“ des Mail-Kontos ab – ohne Fenster. Gesendet wird nichts.")
                             Button {
                                 engine.saveDraft(draft, for: thread)
                                 Task { await engine.openReply(for: thread, text: draft) }
@@ -262,10 +281,10 @@ struct ThreadDetailView: View {
         return r
     }
 
-    private func redraft() {
+    private func redraft(slots: Bool = false) {
         working = true
         Task {
-            if let text = await engine.redraft(thread, hint: hint) {
+            if let text = await engine.redraft(thread, hint: hint, forceSlots: slots) {
                 draft = text
                 hint = ""
             }

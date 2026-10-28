@@ -90,3 +90,20 @@ extension Engine {
         applyPrivacyRetroactively()
     }
 }
+
+/// Vorfilter: Einordnen ohne Claude
+extension Engine {
+    /// Entscheidung des Vorfilters für eine neue Mail – `nil`, wenn Claude entscheiden soll.
+    /// Laufende Gespräche (ich bin am Zug oder warte) gehen immer an Claude.
+    func localVerdict(_ m: StoredMessage, key: String) -> Prefilter.Verdict? {
+        if let t = try? store.thread(key), t.status == .needsReply || t.status == .waiting { return nil }
+        // Eigene Regel mit „Ohne Claude einordnen“
+        if !m.isFromMe, let r = settings.rules.first(where: { $0.skipClaude && RuleEngine.matches($0, m) }),
+           let c = r.category, settings.category(named: c) != nil {
+            return Prefilter.Verdict(category: c, reason: "Regel „\(r.name)“", source: "Regel")
+        }
+        let corrected = !((try? store.corrections(senderEmail: m.senderEmail, domain: "", limit: 1)) ?? []).isEmpty
+        return Prefilter.verdict(for: m, settings: settings, history: store.senderHistory(email: m.senderEmail, excluding: m.messageId),
+                                 hasCorrections: corrected, isVIP: isVIP(m.senderEmail))
+    }
+}

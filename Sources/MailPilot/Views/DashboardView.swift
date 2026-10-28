@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
-    case search, briefing, weekly, needsReply, waiting, snoozed, all, invoices, newsletter, rules, usage, activity, settings
+    case search, briefing, weekly, needsReply, waiting, snoozed, all, invoices, invites, newsletter, rules, usage, activity, settings
 
     var id: String { rawValue }
 
@@ -15,6 +15,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .snoozed: "Zurückgestellt"
         case .all: "Alle Gespräche"
         case .invoices: "Rechnungen"
+        case .invites: "Einladungen"
         case .newsletter: "Newsletter"
         case .rules: "Regeln & VIP"
         case .usage: "Claude-Nutzung"
@@ -33,6 +34,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .snoozed: "moon.zzz.fill"
         case .all: "bubble.left.and.bubble.right.fill"
         case .invoices: "eurosign.circle.fill"
+        case .invites: "calendar.badge.plus"
         case .newsletter: "envelope.badge.fill"
         case .rules: "slider.horizontal.3"
         case .usage: "gauge.with.dots.needle.50percent"
@@ -69,6 +71,7 @@ struct DashboardView: View {
                 }
                 Section {
                     row(.invoices, count: engine.invoiceAlertCount)
+                    row(.invites, count: engine.newInviteCount)
                     row(.newsletter, count: nil)
                 } header: {
                     Eyebrow(text: "Belege & Aufräumen")
@@ -105,6 +108,7 @@ struct DashboardView: View {
                 case .snoozed: ThreadsView(filter: nil, snoozedOnly: true)
                 case .all: ThreadsView(filter: nil)
                 case .invoices: InvoicesView()
+                case .invites: InvitesView()
                 case .newsletter: NewsletterView()
                 case .rules: RulesView()
                 case .usage: UsageView()
@@ -114,6 +118,12 @@ struct DashboardView: View {
             }
         }
         .tint(CTW.accent)
+        .onChange(of: engine.requestedSidebar) { _, new in
+            if let new { selection = new; engine.requestedSidebar = nil }
+        }
+        .onChange(of: engine.focusThread) { _, new in
+            if new != nil { selection = .all }
+        }
         .toolbar {
             ToolbarItem {
                 Button {

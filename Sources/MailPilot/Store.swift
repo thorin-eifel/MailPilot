@@ -118,6 +118,7 @@ final class Store: @unchecked Sendable {
         """)
         try db.exec("CREATE TABLE IF NOT EXISTS briefings (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, text TEXT)")
         try db.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+        try? db.exec("ALTER TABLE messages ADD COLUMN hdr_flags TEXT")
         try? db.exec("ALTER TABLE activity ADD COLUMN extra TEXT")
         try? db.exec("ALTER TABLE messages ADD COLUMN is_read INTEGER")
         try? db.exec("ALTER TABLE messages ADD COLUMN unsub TEXT")
@@ -155,6 +156,12 @@ final class Store: @unchecked Sendable {
             sender_email TEXT PRIMARY KEY, name TEXT, status TEXT DEFAULT 'open', method TEXT, target TEXT, one_click INTEGER DEFAULT 0,
             checked REAL, done REAL)
         """)
+        try db.exec("""
+        CREATE TABLE IF NOT EXISTS invites (
+            uid TEXT PRIMARY KEY, message_id TEXT, summary TEXT, start REAL, end REAL, all_day INTEGER, location TEXT, organizer TEXT, method TEXT,
+            status TEXT DEFAULT 'new', recurring INTEGER DEFAULT 0, cancelled INTEGER DEFAULT 0, account TEXT, subject TEXT, mail_date REAL, notes TEXT)
+        """)
+        try db.exec("CREATE TABLE IF NOT EXISTS invite_scan (message_id TEXT PRIMARY KEY, ts REAL)")
         try db.exec("CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, kind TEXT, text TEXT, stats TEXT)")
         try db.exec("""
         CREATE TABLE IF NOT EXISTS suggestions (
@@ -185,11 +192,12 @@ final class Store: @unchecked Sendable {
         let date = Date.fromISO(raw.date) ?? Date()
         try db.exec("""
         INSERT OR IGNORE INTO messages (message_id, mail_id, account, mailbox, subject, sender, sender_email,
-            recipients, date, is_from_me, in_reply_to, refs, content, is_read, unsub, unsub_post)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            recipients, date, is_from_me, in_reply_to, refs, content, is_read, unsub, unsub_post, hdr_flags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [raw.messageId, raw.id, raw.account, raw.mailbox, raw.subject, raw.sender, senderEmail,
               (raw.to + raw.cc).joined(separator: ","), date, isFromMe, raw.inReplyTo,
-              raw.references.joined(separator: " "), raw.content, raw.read.map { $0 ? 1 : 0 }, raw.unsubscribe, raw.unsubscribePost])
+              raw.references.joined(separator: " "), raw.content, raw.read.map { $0 ? 1 : 0 }, raw.unsubscribe, raw.unsubscribePost,
+              raw.headerFlags])
         try? indexMessage(raw.messageId)
     }
 
@@ -274,7 +282,9 @@ final class Store: @unchecked Sendable {
             processed: r.int("processed") == 1,
             error: r.string("error"),
             decidedBy: r.string("decided_by"),
-            isPrivate: r.bool("is_private")
+            isPrivate: r.bool("is_private"),
+            hdrFlags: r.string("hdr_flags") ?? "",
+            unsub: r.string("unsub")
         )
     }
 

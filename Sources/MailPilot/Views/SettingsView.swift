@@ -55,12 +55,24 @@ struct SettingsView: View {
 
             StyleSection()
 
+            ContactsSection()
+
+            AvailabilitySection()
+
             Section(header: SectionHeader(title: "Claude", symbol: "sparkles")) {
                 Picker("Modell", selection: $engine.settings.model) {
                     Text("Sonnet (empfohlen)").tag("sonnet")
                     Text("Haiku (schnell)").tag("haiku")
                     Text("Opus (gründlich)").tag("opus")
                 }
+                Picker("Modell für ältere Mails (Massenanalyse)", selection: $engine.settings.modelBulk) {
+                    Text("Haiku (günstig, empfohlen)").tag("haiku")
+                    Text("Sonnet").tag("sonnet")
+                    Text("Wie oben").tag("")
+                }
+                Toggle("Automatische Mails ohne Claude einordnen (Header, bekannte Absender)", isOn: $engine.settings.prefilterEnabled)
+                Stepper(engine.settings.initialScanDays == 0 ? "Erstscan: gesamter Posteingang" : "Erstscan: nur die letzten \(engine.settings.initialScanDays) Tage",
+                        value: $engine.settings.initialScanDays, in: 0...3650, step: 30)
                 TextField("Pfad zur claude CLI (leer = automatisch)", text: $engine.settings.claudePath)
                 HStack {
                     Button("Verbindung testen") {
@@ -234,6 +246,7 @@ struct MoveStatusBadge: View {
     @EnvironmentObject var engine: Engine
     let account: String
     @ViewState private var checking = false
+    @ViewState private var confirmProbe = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -255,17 +268,29 @@ struct MoveStatusBadge: View {
                 .foregroundStyle(CTW.accent)
                 .disabled(checking)
             default:
-                Badge(text: "Verschieben ungeprüft", color: CTW.grey500, symbol: "questionmark.circle")
+                Badge(text: engine.settings.probeMoveAccounts.contains(account) ? "Probe-Verschiebung erlaubt" : "Verschieben aus – ungeprüft",
+                      color: CTW.grey500, symbol: "questionmark.circle")
+                if !engine.settings.probeMoveAccounts.contains(account) {
+                    Button { confirmProbe = true } label: { Label("Verschieben testen …", systemImage: "testtube.2").font(.caption) }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(CTW.accent)
+                }
             }
         }
         .help(helpText)
+        .confirmationDialog("Verschieben in „\(account)“ testen?", isPresented: $confirmProbe, titleVisibility: .visible) {
+            Button("Eine Mail probeweise verschieben", role: .destructive) { engine.settings.probeMoveAccounts.append(account) }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("MailPilot verschiebt dann eine einzelne Mail in einen Ordner „Claude/…“ und prüft, ob sie dort wieder auftaucht. Bei manchen Konten – vor allem Exchange – kann diese Mail danach in Mail nicht mehr sichtbar sein (sie liegt dann nur auf dem Server). Teste das lieber zuerst mit einem Konto, in dem das nicht weh tut.")
+        }
     }
 
     private var helpText: String {
         switch engine.moveStatus[account] {
         case "ok": "Verschobene Mails wurden im Zielordner wiedergefunden."
         case "blocked": "Verschobene Mails lassen sich im Zielordner nicht zurücklesen. In diesem Konto wird nur markiert, nicht verschoben. Nach einer Änderung am Konto oder an den Ordnern „Erneut prüfen“."
-        default: "Die erste Verschiebung dient als Probe: Wird die Mail im Zielordner gefunden, wird das Konto freigegeben."
+        default: "In diesem Konto wird nicht verschoben, nur markiert. Mit „Verschieben testen“ erlaubst du eine einzelne Probe-Verschiebung."
         }
     }
 }
@@ -297,8 +322,8 @@ struct DeadlinesSection: View {
                     ForEach(listOptions, id: \.self) { Text($0).tag($0) }
                 }
             }
-            if engine.settings.deadlineTarget == .calendar || engine.settings.deadlineTarget == .both {
-                Picker("Kalender", selection: Binding(
+            Group {
+                Picker("Kalender für Fristen und Einladungen", selection: Binding(
                     get: { engine.settings.calendarID },
                     set: { id in
                         engine.settings.calendarID = id
@@ -312,6 +337,8 @@ struct DeadlinesSection: View {
                     Label("Ohne Kalenderauswahl werden keine Termine angelegt.", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(CTW.action)
                 }
+                Toggle("Einladungen aus Mails automatisch eintragen", isOn: $engine.settings.autoAddInvites)
+                    .disabled(engine.settings.calendarID.isEmpty)
             }
         } header: {
             SectionHeader(title: "Fristen", symbol: "calendar.badge.clock")
@@ -580,5 +607,103 @@ struct DataSection: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         importURL = url
         confirmImport = true
+    }
+}
+
+/// Kontakte: Namen anzeigen und VIP-Liste aus einer Gruppe füllen.
+struct ContactsSection: View {
+    @EnvironmentObject var engine: Engine
+    @ViewState private var groups: [String] = []
+
+    var body: some View {
+        Section {
+            HStack {
+                Label(ContactsDirectory.shared.statusText, systemImage: ContactsDirectory.shared.isAuthorized ? "checkmark.shield.fill" : "person.crop.circle.badge.questionmark")
+                    .foregroundStyle(ContactsDirectory.shared.isAuthorized ? CTW.teal700 : CTW.muted)
+                Spacer()
+                if !ContactsDirectory.shared.isAuthorized {
+                    Button { Task { await engine.requestContactsAccess(); groups = ContactsDirectory.shared.groupNames() } } label: {
+                        Label("Zugriff erlauben …", systemImage: "person.crop.circle.badge.checkmark")
+                    }
+                    .buttonStyle(.ctwPrimary)
+                } else {
+                    Button { Task { await engine.syncContacts(); groups = ContactsDirectory.shared.groupNames() } } label: {
+                        Label("Jetzt abgleichen", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.ctwSecondary)
+                }
+            }
+            if ContactsDirectory.shared.isAuthorized {
+                Toggle("Namen aus Kontakten verwenden, wenn die Mail keinen Namen enthält", isOn: $engine.settings.useContactNames)
+                Picker("VIP-Liste aus Kontaktgruppe", selection: $engine.settings.vipContactGroup) {
+                    Text("Aus").tag("")
+                    ForEach(groups, id: \.self) { Text($0).tag($0) }
+                }
+                .onChange(of: engine.settings.vipContactGroup) { _, _ in Task { await engine.syncContacts() } }
+                Text("\(ContactsDirectory.shared.count) Kontakte mit E-Mail-Adresse geladen.").font(.caption).foregroundStyle(CTW.muted)
+            }
+        } header: {
+            SectionHeader(title: "Kontakte", symbol: "person.crop.rectangle.stack")
+        } footer: {
+            Text("MailPilot liest Namen und E-Mail-Adressen nur lokal; an Claude gehen sie nicht. Mitglieder der gewählten Gruppe stehen automatisch auf der VIP-Liste (in „Regeln & VIP“ mit dem Vermerk „Kontakte“); von Hand eingetragene VIPs bleiben unberührt.")
+                .font(.caption).foregroundStyle(CTW.muted)
+        }
+        .onAppear { groups = ContactsDirectory.shared.groupNames() }
+    }
+}
+
+/// Freie Zeiten aus dem Kalender für Antwortentwürfe.
+struct AvailabilitySection: View {
+    @EnvironmentObject var engine: Engine
+    @ViewState private var calendars: [CalendarAvailability.Info] = []
+
+    private var preview: [String] {
+        engine.freeSlotTexts(for: [], force: true)
+    }
+
+    var body: some View {
+        Section {
+            HStack {
+                Label(CalendarAvailability.shared.statusText, systemImage: CalendarAvailability.shared.isAuthorized ? "checkmark.shield.fill" : "calendar.badge.exclamationmark")
+                    .foregroundStyle(CalendarAvailability.shared.isAuthorized ? CTW.teal700 : CTW.muted)
+                Spacer()
+                if !CalendarAvailability.shared.isAuthorized {
+                    Button { Task { await engine.requestCalendarAccess(); calendars = CalendarAvailability.shared.calendars() } } label: {
+                        Label("Zugriff erlauben …", systemImage: "calendar.badge.checkmark")
+                    }
+                    .buttonStyle(.ctwPrimary)
+                }
+            }
+            Toggle("Freie Zeiten in Antwortentwürfen vorschlagen", isOn: $engine.settings.useFreeSlots)
+            if CalendarAvailability.shared.isAuthorized {
+                Stepper("Arbeitszeit ab \(engine.settings.workStartHour) Uhr", value: $engine.settings.workStartHour, in: 5...14)
+                Stepper("Arbeitszeit bis \(engine.settings.workEndHour) Uhr", value: $engine.settings.workEndHour, in: 12...22)
+                Picker("Dauer eines Termins", selection: $engine.settings.slotMinutes) {
+                    ForEach([30, 45, 60, 90, 120], id: \.self) { Text("\($0) Minuten").tag($0) }
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Kalender, die Zeiten belegen (keiner gewählt = alle)").font(.caption).foregroundStyle(CTW.muted)
+                    ForEach(calendars) { c in
+                        Toggle(isOn: Binding(
+                            get: { engine.settings.availabilityCalendars.contains(c.id) },
+                            set: { on in
+                                engine.settings.availabilityCalendars.removeAll { $0 == c.id }
+                                if on { engine.settings.availabilityCalendars.append(c.id) }
+                            })) {
+                            Text(c.title) + Text(c.source.isEmpty ? "" : "  ·  \(c.source)").foregroundColor(CTW.muted)
+                        }
+                    }
+                }
+                if !preview.isEmpty {
+                    Text("Nächste freie Zeiten: " + preview.joined(separator: "; ")).font(.caption).foregroundStyle(CTW.muted)
+                }
+            }
+        } header: {
+            SectionHeader(title: "Kalender & freie Zeiten", symbol: "calendar.badge.clock")
+        } footer: {
+            Text("Wenn eine Mail nach einem Termin fragt, nennt Claude im Entwurf freie Zeiten aus deinem Kalender. Dafür gehen nur die Zeiträume („Dienstag, 4. November, 10:00–11:00 Uhr“) an Claude – nie Titel, Orte oder Teilnehmer. Ganztägige, abgesagte und als „frei“ markierte Termine blockieren nichts.")
+                .font(.caption).foregroundStyle(CTW.muted)
+        }
+        .onAppear { calendars = CalendarAvailability.shared.calendars() }
     }
 }
