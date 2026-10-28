@@ -116,6 +116,18 @@ final class Store: @unchecked Sendable {
         """)
         try db.exec("CREATE TABLE IF NOT EXISTS briefings (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, text TEXT)")
         try db.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+        try? db.exec("ALTER TABLE messages ADD COLUMN decided_by TEXT")
+        try? db.exec("ALTER TABLE messages ADD COLUMN moved_at REAL")
+        try db.exec("""
+        CREATE TABLE IF NOT EXISTS corrections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, message_id TEXT, subject TEXT, account TEXT,
+            sender_email TEXT, domain TEXT, from_category TEXT, to_category TEXT, to_inbox INTEGER DEFAULT 0, source TEXT)
+        """)
+        try db.exec("""
+        CREATE TABLE IF NOT EXISTS suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, kind TEXT, value TEXT, category TEXT,
+            keep_inbox INTEGER DEFAULT 0, count INTEGER, status TEXT DEFAULT 'open', ts REAL)
+        """)
     }
 
     // MARK: Key-Value
@@ -148,7 +160,7 @@ final class Store: @unchecked Sendable {
     }
 
     /// `IN (?, ?, …)`-Klausel für eine Kontenliste.
-    private func inList(_ accounts: [String]) -> String {
+    func inList(_ accounts: [String]) -> String {
         accounts.isEmpty ? "('')" : "(" + accounts.map { _ in "?" }.joined(separator: ",") + ")"
     }
 
@@ -165,9 +177,10 @@ final class Store: @unchecked Sendable {
         try db.query("SELECT * FROM messages WHERE message_id = ?", [id]).first.map(message)
     }
 
-    func saveAnalysis(of messageId: String, threadKey: String, category: String?, priority: Priority?, summary: String?) throws {
-        try db.exec("UPDATE messages SET thread_key = ?, category = ?, priority = ?, summary = ?, processed = 1, error = NULL WHERE message_id = ?",
-                    [threadKey, category, priority?.rawValue, summary, messageId])
+    func saveAnalysis(of messageId: String, threadKey: String, category: String?, priority: Priority?, summary: String?,
+                      decidedBy: String? = nil) throws {
+        try db.exec("UPDATE messages SET thread_key = ?, category = ?, priority = ?, summary = ?, decided_by = ?, processed = 1, error = NULL WHERE message_id = ?",
+                    [threadKey, category, priority?.rawValue, summary, decidedBy, messageId])
     }
 
     func setThreadKey(_ key: String, for messageId: String) throws {
@@ -197,14 +210,14 @@ final class Store: @unchecked Sendable {
     }
 
     func updateLocation(_ messageId: String, mailbox: String, mailId: Int) throws {
-        try db.exec("UPDATE messages SET mailbox = ?, mail_id = ? WHERE message_id = ?", [mailbox, mailId, messageId])
+        try db.exec("UPDATE messages SET mailbox = ?, mail_id = ?, moved_at = ? WHERE message_id = ?", [mailbox, mailId, Date(), messageId])
     }
 
     func countMessages(since: Date) -> Int {
         (try? db.query("SELECT COUNT(*) AS n FROM messages WHERE date >= ? AND is_from_me = 0", [since]))?.first?.int("n") ?? 0
     }
 
-    private func message(_ r: Row) -> StoredMessage {
+    func message(_ r: Row) -> StoredMessage {
         StoredMessage(
             messageId: r.string("message_id") ?? "",
             mailId: r.int("mail_id"),
@@ -224,7 +237,8 @@ final class Store: @unchecked Sendable {
             priority: r.string("priority").flatMap(Priority.init(rawValue:)),
             summary: r.string("summary"),
             processed: r.int("processed") == 1,
-            error: r.string("error")
+            error: r.string("error"),
+            decidedBy: r.string("decided_by")
         )
     }
 

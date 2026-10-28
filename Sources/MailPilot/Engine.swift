@@ -19,7 +19,7 @@ final class Engine: ObservableObject {
 
     @Published var settings: AppSettings {
         didSet {
-            settings.save(to: Paths.settings)
+            if persistSettings { settings.save(to: Paths.settings) }
             if oldValue.pollMinutes != settings.pollMinutes { schedule() }
             if oldValue.enabledAccounts != settings.enabledAccounts { accountsChanged() }
         }
@@ -28,17 +28,23 @@ final class Engine: ObservableObject {
     @Published private(set) var accounts: [MailAccountInfo] = []
     @Published private(set) var threads: [MailThread] = []
     @Published private(set) var activity: [ActivityEntry] = []
+    /// Je Konto: "ok" (Zielordner zurücklesbar) oder "blocked" (nur markieren). Fehlt = noch ungeprüft.
+    @Published var moveStatus: [String: String] = [:]
+    @Published private(set) var suggestions: [RuleSuggestion] = []
+    @Published private(set) var corrections: [Correction] = []
     @Published private(set) var briefing: Briefing?
-    @Published private(set) var isRunning = false
+    @Published var isRunning = false
     @Published private(set) var isBriefing = false
-    @Published private(set) var status = "Bereit"
+    @Published var status = "Bereit"
     @Published private(set) var lastRun: Date?
-    @Published private(set) var lastError: String?
+    @Published var lastError: String?
     @Published private(set) var initialProgress: InitialProgress?
     @Published var paused = false { didSet { schedule() } }
 
     let store: Store
     let bridge = MailBridge()
+    /// Für die Bildvorschau aus: Beispieldaten dürfen die echte settings.json nicht überschreiben.
+    var persistSettings = true
     private var loop: Task<Void, Never>?
     private var myAddresses: [String]
     /// Abbruchgrund innerhalb paralleler Analysen (z. B. Claude nicht angemeldet oder Limit erreicht).
@@ -113,7 +119,42 @@ final class Engine: ObservableObject {
     func reload() {
         threads = (try? store.threads(accounts: enabledAccountNames)) ?? []
         activity = (try? store.activity()) ?? []
+        suggestions = (try? store.openSuggestions()) ?? []
+        moveStatus = Dictionary(uniqueKeysWithValues: accounts.compactMap { a in
+            store.value("moveCheck.\(a.name)").map { (a.name, $0) }
+        })
+        corrections = (try? store.corrections(limit: 40)) ?? []
         briefing = try? store.latestBriefing()
+    }
+
+    /// Beispieldaten für die Bildvorschau (`--render`); wird nie gespeichert.
+    func loadPreviewSamples() {
+        persistSettings = false
+        var r1 = UserRule()
+        r1.name = "PayPal-Belege"
+        r1.conditions = [RuleCondition(field: .domain, value: "paypal.com")]
+        r1.category = "Rechnungen"
+        r1.priority = .normal
+        var r2 = UserRule()
+        r2.name = "Angebote im Posteingang lassen"
+        r2.matchAll = false
+        r2.conditions = [RuleCondition(field: .sender, value: "angebote@"), RuleCondition(field: .subject, value: "Sonderangebot")]
+        r2.keepInInbox = true
+        r2.learned = true
+        settings.rules = [r1, r2]
+        settings.vips = [VIPEntry(name: "Geschäftsführung", match: "chef@firma.example"), VIPEntry(name: "Kunde Beispiel AG", match: "beispiel-ag.example")]
+        suggestions = [
+            RuleSuggestion(id: 1, kind: "sender", value: "news@shop.example", category: "Rechnungen", keepInInbox: false, count: 2),
+            RuleSuggestion(id: 2, kind: "domain", value: "lieferant.example", category: "Bestellungen", keepInInbox: false, count: 4),
+        ]
+        corrections = [
+            Correction(id: 1, date: Date().addingTimeInterval(-1800), messageId: "a", subject: "Ihre Rechnung Oktober", senderEmail: "news@shop.example",
+                       fromCategory: "Newsletter", toCategory: "Rechnungen", toInbox: false, source: "mail"),
+            Correction(id: 2, date: Date().addingTimeInterval(-86400), messageId: "b", subject: "Angebot für Ihr Projekt", senderEmail: "angebote@partner.example",
+                       fromCategory: "Werbung", toCategory: nil, toInbox: true, source: "mail"),
+            Correction(id: 3, date: Date().addingTimeInterval(-172800), messageId: "c", subject: "Lieferung unterwegs", senderEmail: "a@lieferant.example",
+                       fromCategory: "Benachrichtigungen", toCategory: "Bestellungen", toInbox: false, source: "app"),
+        ]
     }
 
     // MARK: Start & Zeitplan
@@ -132,6 +173,9 @@ final class Engine: ObservableObject {
                 status = "Vorschau – Automatik aus"
                 return
             }
+            // Verschiebe-Schutz früh auswerten (nur lesend), damit die Konten sofort ihren Status zeigen.
+            for account in enabledAccountNames { _ = await moveGate(account) }
+            reload()
             if initialComplete { schedule() } else { await runInitialScan() }
         }
     }
@@ -248,6 +292,8 @@ final class Engine: ObservableObject {
             try ingest(result)
             try await analyzePending(claude: claude)
             try await applyPendingActions(initial: false)
+            status = "Prüfe Korrekturen …"
+            await syncCorrections()
             checkFollowUps()
             try await briefingIfDue(claude: claude)
             status = result.remaining > 0 ? "\(result.remaining) weitere Mails im nächsten Durchlauf" : "Aktuell"
@@ -310,7 +356,8 @@ final class Engine: ObservableObject {
     private func analyzeChunk(_ chunk: [(StoredMessage, String)], claude: ClaudeClient) async {
         guard abortError == nil else { return }
         do {
-            let results = try await claude.classifyBatch(chunk.map(\.0), settings: settings, myAddresses: myAddresses)
+            let results = try await claude.classifyBatch(chunk.map(\.0), settings: settings, myAddresses: myAddresses,
+                                                      hints: chunk.map { Learner.hints(for: $0.0, store: store, settings: settings) })
             for (i, (m, key)) in chunk.enumerated() {
                 if let a = results[i] {
                     try record(m, key: key, analysis: a)
@@ -330,7 +377,8 @@ final class Engine: ObservableObject {
             let existing = try store.thread(key)
             let history = try store.messages(inThread: key, limit: 6)
             let a = try await claude.analyze(message: m, thread: existing, history: history,
-                                             settings: settings, myAddresses: myAddresses)
+                                             settings: settings, myAddresses: myAddresses,
+                                             hints: Learner.hints(for: m, store: store, settings: settings))
             try record(m, key: key, analysis: a)
         } catch {
             handle(error, for: [m])
@@ -350,9 +398,14 @@ final class Engine: ObservableObject {
     }
 
     /// Speichert das Analyse-Ergebnis an der Nachricht und aktualisiert das Gespräch.
-    private func record(_ m: StoredMessage, key: String, analysis a: MessageAnalysis) throws {
+    private func record(_ m: StoredMessage, key: String, analysis claude: MessageAnalysis) throws {
+        // Eigene Regeln und VIP-Liste haben Vorrang vor Claudes Einschätzung.
+        let effect = RuleEngine.evaluate(m, settings: settings)
+        var a = claude
+        if let c = effect.category { a.category = c }
+        if let p = effect.priority { a.priority = p }
         try store.saveAnalysis(of: m.messageId, threadKey: key, category: m.isFromMe ? nil : a.category,
-                               priority: a.priority, summary: a.summary)
+                               priority: a.priority, summary: a.summary, decidedBy: m.isFromMe ? nil : (effect.decidedBy ?? "Claude"))
 
         let existing = try store.thread(key)
         let isLatest = existing.map { m.date >= $0.lastDate } ?? true
@@ -386,15 +439,19 @@ final class Engine: ObservableObject {
         try store.upsert(t)
 
         let fresh = m.date > Date().addingTimeInterval(-Double(settings.lookbackDays) * 86400)
-        if initialComplete, fresh, !m.isFromMe, a.priority == .high, a.needs_reply {
-            notify(title: "Wichtig: \(m.senderName)", body: "\(m.subject)\n\(a.summary)", id: m.messageId)
+        if initialComplete, fresh, !m.isFromMe {
+            if effect.vip, settings.vipNotify {
+                notify(title: "VIP: \(m.senderName)", body: "\(m.subject)\n\(a.summary)", id: m.messageId)
+            } else if a.priority == .high, a.needs_reply {
+                notify(title: "Wichtig: \(m.senderName)", body: "\(m.subject)\n\(a.summary)", id: m.messageId)
+            }
         }
     }
 
     // MARK: Aktionen in Mail
 
     /// Wendet Ordner und Flaggen auf alle analysierten, noch nicht bearbeiteten Mails an – stapelweise.
-    private func applyPendingActions(initial: Bool) async throws {
+    func applyPendingActions(initial: Bool, retro: Bool = false) async throws {
         let flagCutoff = Date().addingTimeInterval(-detailedDays * 86400)
         let archiveCutoff = Date().addingTimeInterval(-Double(settings.archiveAfterDays) * 86400)
 
@@ -403,15 +460,25 @@ final class Engine: ObservableObject {
             if pending.isEmpty { return }
             var items: [MailBridge.BatchItem] = []
             var byId: [String: StoredMessage] = [:]
+            // Pro Konto: darf verschoben werden? (Zielordner zurücklesbar, Probe-Mail oder nur markieren)
+            var gates: [String: MoveGate] = [:]
+            for account in Set(pending.map(\.account)) { gates[account] = await moveGate(account) }
+            var canaryUsed = Set<String>()
 
             for m in pending {
                 let rule = settings.category(named: m.category)
+                let effect = RuleEngine.evaluate(m, settings: settings)
                 // Gmail meldet Posteingangsmails im Ordner „Alle Nachrichten“; Verschieben würde dort nur Labels ändern.
                 let isGmailAllMail = ["alle nachrichten", "all mail", "[gmail]/alle nachrichten", "[gmail]/all mail"].contains(m.mailbox.lowercased())
 
                 var target: String?
                 if settings.autoMove, !isGmailAllMail, !m.account.isEmpty {
-                    if let rule, let folder = settings.folderPath(for: rule) {
+                    if effect.keepInInbox {
+                        // Nicht sortieren; lag die Mail schon in einem Claude-Ordner, zurück in den Posteingang.
+                        if !settings.folderPrefix.isEmpty, m.mailbox.hasPrefix(settings.folderPrefix) { target = MailBridge.inboxToken }
+                    } else if let f = effect.folder {
+                        target = settings.folderPrefix + f
+                    } else if let rule, let folder = settings.folderPath(for: rule) {
                         target = folder
                     } else if settings.archiveAfterDays > 0, m.date < archiveCutoff, !settings.archiveFolder.isEmpty,
                               let key = m.threadKey, let t = try store.thread(key), t.status == .info || t.status == .done {
@@ -421,10 +488,29 @@ final class Engine: ObservableObject {
                 }
 
                 // Beim Erstscan nur aktuelle Mails markieren, sonst würden hunderte alte Flaggen entstehen.
-                var flag: FlagColor?
-                if settings.autoFlag, !initial || m.date >= flagCutoff {
-                    flag = m.priority == .high ? .red : rule?.flag
+                if target != nil {
+                    switch gates[m.account] ?? .canary {
+                    case .allowed:
+                        break
+                    case .blocked:
+                        target = nil
+                    case .canary:
+                        if settings.dryRun { break }
+                        // Erst eine Probe-Mail verschieben und verifizieren; der Rest folgt im nächsten Durchgang.
+                        if canaryUsed.contains(m.account) { continue }
+                        canaryUsed.insert(m.account)
+                    }
                 }
+
+                var flag: FlagColor?
+                if settings.autoFlag {
+                    if let f = effect.flag {
+                        flag = f
+                    } else if !(initial || retro) || m.date >= flagCutoff {
+                        flag = m.priority == .high ? .red : rule?.flag
+                    }
+                }
+                let targetLabel = target == MailBridge.inboxToken ? "Posteingang" : target
 
                 if target == nil && flag == nil {
                     try store.markActioned(m.messageId)
@@ -432,7 +518,10 @@ final class Engine: ObservableObject {
                 }
                 if settings.dryRun {
                     if let flag { store.log(m, kind: "flag", detail: "Würde \(flag.label) markieren (\(m.category ?? ""))", dryRun: true) }
-                    if let target { store.log(m, kind: "move", detail: "Würde nach „\(target)“ verschieben", from: m.mailbox, to: target, dryRun: true) }
+                    if let target, let targetLabel {
+                        store.log(m, kind: "move", detail: "Würde nach „\(targetLabel)“ verschieben", from: m.mailbox,
+                                  to: target == MailBridge.inboxToken ? nil : target, dryRun: true)
+                    }
                     try store.markActioned(m.messageId)
                     continue
                 }
@@ -443,8 +532,9 @@ final class Engine: ObservableObject {
             }
 
             guard !items.isEmpty else { continue }
-            if initial { status = "Erstscan: sortiere \(items.count) Mails ein …" }
+            if initial || retro { status = "\(retro ? "Regeln anwenden" : "Erstscan"): sortiere \(items.count) Mails ein …" }
             let results = try await bridge.batch(items)
+            var moveStats: [String: (moved: Int, lost: Int)] = [:]
             for (item, r) in zip(items, results) {
                 guard let m = byId[item.messageId] else { continue }
                 if r.ok {
@@ -452,13 +542,35 @@ final class Engine: ObservableObject {
                         store.log(m, kind: "flag", detail: "\(flag.label) markiert (\(m.category ?? ""))", dryRun: false)
                     }
                     if let target = item.target {
-                        try store.updateLocation(m.messageId, mailbox: target, mailId: 0)
-                        store.log(m, kind: "move", detail: "Nach „\(target)“ verschoben", from: m.mailbox, to: target, dryRun: false)
+                        let found = r.verified ?? true
+                        moveStats[m.account, default: (0, 0)].moved += 1
+                        if !found {
+                            moveStats[m.account, default: (0, 0)].lost += 1
+                            store.log(m, kind: "error",
+                                      detail: "Verschoben, aber im Zielordner „\(target == MailBridge.inboxToken ? "Posteingang" : target)“ nicht wiederzufinden – bitte in Mail prüfen",
+                                      dryRun: false)
+                        }
+                        if target == MailBridge.inboxToken {
+                            try store.updateLocation(m.messageId, mailbox: r.mailbox ?? "Posteingang", mailId: 0)
+                            store.log(m, kind: "move", detail: "Zurück in den Posteingang gelegt", from: m.mailbox, to: nil, dryRun: false)
+                        } else {
+                            try store.updateLocation(m.messageId, mailbox: target, mailId: 0)
+                            store.log(m, kind: "move", detail: "Nach „\(target)“ verschoben", from: m.mailbox, to: target, dryRun: false)
+                        }
                     }
                 } else {
                     store.log(m, kind: "error", detail: "Fehlgeschlagen: \(r.error ?? "unbekannt")", dryRun: false)
                 }
                 try store.markActioned(m.messageId)
+            }
+            // Ergebnis der Verifikation: Probe bestanden → Konto freigeben; Mails nicht auffindbar → Konto sperren.
+            for (account, s) in moveStats {
+                let probe = gates[account] == .canary
+                if s.lost > 0 && (probe || s.lost * 2 >= s.moved) {
+                    setMoveStatus(account, "blocked", detail: "\(s.lost) von \(s.moved) verschobenen Mails waren im Zielordner nicht zurücklesbar")
+                } else if probe && s.moved > 0 && s.lost == 0 {
+                    setMoveStatus(account, "ok", detail: nil)
+                }
             }
             activity = (try? store.activity()) ?? activity
         }
@@ -579,7 +691,7 @@ final class Engine: ObservableObject {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    private func notify(title: String, body: String, id: String) {
+    func notify(title: String, body: String, id: String) {
         guard settings.notifications, Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
         content.title = title

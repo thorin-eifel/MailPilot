@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
-    case briefing, needsReply, waiting, all, activity, settings
+    case briefing, needsReply, waiting, all, rules, activity, settings
 
     var id: String { rawValue }
 
@@ -11,6 +11,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .needsReply: "Antwort nötig"
         case .waiting: "Warte auf Antwort"
         case .all: "Alle Gespräche"
+        case .rules: "Regeln & VIP"
         case .activity: "Aktivität"
         case .settings: "Einstellungen"
         }
@@ -22,6 +23,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .needsReply: "arrowshape.turn.up.left.fill"
         case .waiting: "hourglass"
         case .all: "bubble.left.and.bubble.right.fill"
+        case .rules: "slider.horizontal.3"
         case .activity: "list.bullet.rectangle.fill"
         case .settings: "gearshape.fill"
         }
@@ -51,6 +53,7 @@ struct DashboardView: View {
                     Eyebrow(text: "Gespräche")
                 }
                 Section {
+                    row(.rules, count: engine.suggestions.count)
                     row(.activity, count: nil)
                     row(.settings, count: nil)
                 } header: {
@@ -76,6 +79,7 @@ struct DashboardView: View {
                 case .needsReply: ThreadsView(filter: .needsReply)
                 case .waiting: ThreadsView(filter: .waiting)
                 case .all: ThreadsView(filter: nil)
+                case .rules: RulesView()
                 case .activity: ActivityView()
                 case .settings: SettingsView()
                 }

@@ -100,6 +100,8 @@ struct StoredMessage: Identifiable, Hashable {
     var summary: String?
     var processed: Bool
     var error: String?
+    /// Woher die Kategorie stammt: „Claude“, „Regel: …“, „VIP“ oder „Korrektur“.
+    var decidedBy: String?
 
     var id: String { messageId }
 

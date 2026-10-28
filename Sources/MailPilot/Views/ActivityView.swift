@@ -72,6 +72,7 @@ struct ActivityView: View {
         case "move": "folder.fill"
         case "flag": "flag.fill"
         case "undo": "arrow.uturn.backward"
+        case "correction": "graduationcap.fill"
         case "error": "exclamationmark.triangle.fill"
         default: "circle.fill"
         }
@@ -80,7 +81,7 @@ struct ActivityView: View {
     private func color(for e: ActivityEntry) -> Color {
         switch e.kind {
         case "error": CTW.action
-        case "flag": CTW.accent
+        case "flag", "correction": CTW.accent
         default: CTW.teal700
         }
     }

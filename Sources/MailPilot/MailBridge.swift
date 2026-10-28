@@ -26,6 +26,7 @@ final class MailBridge: @unchecked Sendable {
     private let actionScript: URL
     private let batchScript: URL
     private let accountsScript: URL
+    private let syncScript: URL
 
     init() {
         fetchScript = Paths.scripts.appendingPathComponent("fetch.js")
@@ -36,6 +37,8 @@ final class MailBridge: @unchecked Sendable {
         try? Self.batchJS.write(to: batchScript, atomically: true, encoding: .utf8)
         accountsScript = Paths.scripts.appendingPathComponent("accounts.js")
         try? Self.accountsJS.write(to: accountsScript, atomically: true, encoding: .utf8)
+        syncScript = Paths.scripts.appendingPathComponent("sync.js")
+        try? Self.syncJS.write(to: syncScript, atomically: true, encoding: .utf8)
     }
 
     func listAccounts() async throws -> [MailAccountInfo] {
@@ -92,6 +95,43 @@ final class MailBridge: @unchecked Sendable {
         var messageId: String
         var ok: Bool
         var error: String?
+        /// Tatsächlicher Ordnername, wenn das Ziel der Posteingang war.
+        var mailbox: String?
+        /// Nur bei verschobenen Mails: im Zielordner wiedergefunden? `false` = nicht zurücklesbar.
+        var verified: Bool?
+    }
+
+    /// Spezielles Verschiebeziel: der Posteingang des jeweiligen Kontos.
+    static let inboxToken = "\u{1}INBOX"
+
+    struct FolderRef: Hashable {
+        var account: String
+        var path: String
+    }
+
+    private struct FolderListing: Decodable {
+        var account: String
+        var path: String
+        var ids: [String]?
+    }
+
+    /// Message-IDs je Ordner (nur lesend). Nicht gefundene Ordner fehlen im Ergebnis.
+    func folderContents(_ refs: [FolderRef]) async throws -> [FolderRef: [String]] {
+        let params: [String: Any] = ["mode": "folders", "folders": refs.map { ["account": $0.account, "path": $0.path] }]
+        let out = try await run(syncScript, params)
+        var result: [FolderRef: [String]] = [:]
+        for l in try JSONDecoder().decode([FolderListing].self, from: Data(out.utf8)) {
+            if let ids = l.ids { result[FolderRef(account: l.account, path: l.path)] = ids }
+        }
+        return result
+    }
+
+    /// Welche der IDs liegen im Posteingang des Kontos? (nur lesend)
+    func inboxMembership(account: String, ids: [String]) async throws -> (inbox: String, found: Set<String>) {
+        struct Out: Decodable { var inbox: String; var found: [String] }
+        let out = try await run(syncScript, ["mode": "inbox", "account": account, "ids": ids])
+        let o = try JSONDecoder().decode(Out.self, from: Data(out.utf8))
+        return (o.inbox, Set(o.found))
     }
 
     /// Markiert und verschiebt viele Nachrichten in einem einzigen osascript-Aufruf.
@@ -221,6 +261,53 @@ final class MailBridge: @unchecked Sendable {
     }
     """#
 
+    private static let syncJS = #"""
+    function run(argv) {
+      ObjC.import('Foundation');
+      const p = JSON.parse($.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null).js);
+      const Mail = Application('Mail');
+
+      // Exchange führt Unterordner unter dem Elternordner, teils mit vollem Pfad als Name.
+      function lookup(acct, name) {
+        const mb = acct.mailboxes.byName(name);
+        if (mb.exists()) return mb;
+        const parts = name.split('/');
+        if (parts.length > 1) {
+          const parent = acct.mailboxes.byName(parts[0]);
+          if (parent.exists()) {
+            for (const cand of [name, parts.slice(1).join('/')]) {
+              const c = parent.mailboxes.byName(cand);
+              if (c.exists()) return c;
+            }
+          }
+        }
+        return null;
+      }
+
+      if (p.mode === 'folders') {
+        const out = [];
+        for (const f of p.folders) {
+          const r = { account: f.account, path: f.path, ids: null };
+          try {
+            const mb = lookup(Mail.accounts.byName(f.account), f.path);
+            if (mb) r.ids = mb.messages.messageId();
+          } catch (e) {}
+          out.push(r);
+        }
+        return JSON.stringify(out);
+      }
+
+      let inbox = null;
+      for (const mb of Mail.inbox.mailboxes()) {
+        try { if (mb.account().name() === p.account) inbox = mb; } catch (e) {}
+      }
+      if (!inbox) throw new Error('Posteingang nicht gefunden: ' + p.account);
+      const want = {};
+      p.ids.forEach(i => { want[i] = true; });
+      return JSON.stringify({ inbox: inbox.name(), found: inbox.messages.messageId().filter(i => want[i]) });
+    }
+    """#
+
     private static let accountsJS = #"""
     function run(argv) {
       const Mail = Application('Mail');
@@ -245,6 +332,14 @@ final class MailBridge: @unchecked Sendable {
       const p = JSON.parse($.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null).js);
       const Mail = Application('Mail');
       const boxes = {};
+      const INBOX = '\u0001INBOX';
+
+      function inboxOf(accountName) {
+        for (const mb of Mail.inbox.mailboxes()) {
+          try { if (mb.account().name() === accountName) return mb; } catch (e) {}
+        }
+        throw new Error('Posteingang nicht gefunden: ' + accountName);
+      }
 
       // Exchange führt Unterordner unter dem Elternordner, teils mit vollem Pfad als Name.
       function lookup(acct, name) {
@@ -266,6 +361,7 @@ final class MailBridge: @unchecked Sendable {
       function ensureMailbox(acct, accountName, name) {
         const key = accountName + '\u0000' + name;
         if (boxes[key]) return boxes[key];
+        if (name === INBOX) { boxes[key] = inboxOf(accountName); return boxes[key]; }
         let mb = lookup(acct, name);
         if (!mb) {
           try { acct.mailboxes.push(Mail.Mailbox({ name: name })); } catch (e) {}
@@ -287,15 +383,39 @@ final class MailBridge: @unchecked Sendable {
       }
 
       const results = [];
+      const moved = [];
       for (const it of p.items) {
         const r = { messageId: it.messageId, ok: true };
         try {
           const acct = Mail.accounts.byName(it.account);
           const m = find(acct, it);
           if (it.flagIndex !== undefined) { m.flaggedStatus = true; m.flagIndex = it.flagIndex; }
-          if (it.target) Mail.move(m, { to: ensureMailbox(acct, it.account, it.target) });
+          if (it.target) {
+            const dest = ensureMailbox(acct, it.account, it.target);
+            Mail.move(m, { to: dest });
+            if (it.target === INBOX) r.mailbox = dest.name();
+            moved.push({ r: r, dest: dest, id: it.messageId, key: it.account + '\u0000' + it.target });
+          }
         } catch (e) { r.ok = false; r.error = String(e); }
         results.push(r);
+      }
+
+      // Verifikation: Liegt jede verschobene Mail jetzt wirklich im Zielordner? IMAP/Exchange brauchen dafür etwas Zeit.
+      // Lässt sich eine Mail dort nicht zurücklesen, bleibt `verified` false.
+      const byKey = {};
+      moved.forEach(x => { (byKey[x.key] = byKey[x.key] || []).push(x); });
+      for (const key of Object.keys(byKey)) {
+        const group = byKey[key];
+        let pending = group;
+        for (let attempt = 0; attempt < 8 && pending.length > 0; attempt++) {
+          if (attempt > 0) delay(0.75);
+          let have = [];
+          try { have = group[0].dest.messages.messageId(); } catch (e) {}
+          const seen = {};
+          have.forEach(i => { seen[i] = true; });
+          pending = pending.filter(x => !seen[x.id]);
+        }
+        group.forEach(x => { x.r.verified = pending.indexOf(x) < 0; });
       }
       return JSON.stringify(results);
     }

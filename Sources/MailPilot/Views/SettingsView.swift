@@ -168,6 +168,7 @@ struct AccountsSection: View {
                                 } else {
                                     Badge(text: "Erstscan ausstehend", color: CTW.action, symbol: "clock")
                                 }
+                                MoveStatusBadge(account: account.name)
                             }
                         }
                     }
@@ -196,7 +197,7 @@ struct AccountsSection: View {
         } header: {
             SectionHeader(title: "Konten", symbol: "person.2.fill")
         } footer: {
-            Text("MailPilot liest, sortiert und verfolgt nur Mails der aktivierten Konten. Ein neu aktiviertes Konto wird zuerst komplett gescannt und einsortiert, danach läuft der Zeitplan weiter. Deaktivierte Konten bleiben unverändert.")
+            Text("MailPilot liest, sortiert und verfolgt nur Mails der aktivierten Konten. Ein neu aktiviertes Konto wird zuerst komplett gescannt und einsortiert, danach läuft der Zeitplan weiter. Deaktivierte Konten bleiben unverändert. Nach jedem Verschieben prüft MailPilot, ob die Mail im Zielordner angekommen ist; Konten, deren Zielordner sich nicht zurücklesen lassen, werden nur markiert.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .task { if engine.accounts.isEmpty { await engine.refreshAccounts() } }
@@ -215,5 +216,46 @@ struct SectionHeader: View {
         }
         .font(.system(size: 11, weight: .semibold))
         .foregroundStyle(CTW.muted)
+    }
+}
+
+/// Zeigt, ob MailPilot in einem Konto verschieben darf, und erlaubt eine erneute Prüfung.
+struct MoveStatusBadge: View {
+    @EnvironmentObject var engine: Engine
+    let account: String
+    @ViewState private var checking = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            switch engine.moveStatus[account] {
+            case "ok":
+                Badge(text: "Verschieben geprüft", color: CTW.teal700, symbol: "checkmark.shield.fill")
+            case "blocked":
+                Badge(text: "Nur markieren – Ordner nicht lesbar", color: CTW.action, symbol: "exclamationmark.shield.fill")
+                Button {
+                    checking = true
+                    Task {
+                        await engine.recheckMoveGate(account)
+                        checking = false
+                    }
+                } label: {
+                    Label("Erneut prüfen", systemImage: "arrow.clockwise").font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(CTW.accent)
+                .disabled(checking)
+            default:
+                Badge(text: "Verschieben ungeprüft", color: CTW.grey500, symbol: "questionmark.circle")
+            }
+        }
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        switch engine.moveStatus[account] {
+        case "ok": "Verschobene Mails wurden im Zielordner wiedergefunden."
+        case "blocked": "Verschobene Mails lassen sich im Zielordner nicht zurücklesen. In diesem Konto wird nur markiert, nicht verschoben. Nach einer Änderung am Konto oder an den Ordnern „Erneut prüfen“."
+        default: "Die erste Verschiebung dient als Probe: Wird die Mail im Zielordner gefunden, wird das Konto freigegeben."
+        }
     }
 }

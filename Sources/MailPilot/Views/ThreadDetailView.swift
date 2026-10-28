@@ -7,6 +7,10 @@ struct ThreadDetailView: View {
     @ViewState private var hint = ""
     @ViewState private var working = false
     @ViewState private var messages: [StoredMessage] = []
+    @ViewState private var ruleDraft: UserRule?
+
+    private var sender: StoredMessage? { messages.last(where: { !$0.isFromMe }) }
+    private var senderIsVIP: Bool { sender.map { engine.isVIP($0.senderEmail) } ?? false }
 
     var body: some View {
         ScrollView {
@@ -93,12 +97,14 @@ struct ThreadDetailView: View {
             draft = thread.draft ?? ""
             messages = engine.messages(in: thread)
         }
+        .sheet(item: $ruleDraft) { RuleEditorSheet(rule: $0).environmentObject(engine) }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Badge(text: thread.status.label, color: thread.status.color, symbol: thread.status.symbol)
+                if senderIsVIP { Badge(text: "VIP", color: CTW.action, symbol: "star.fill") }
                 if thread.priority == .high { Badge(text: "Wichtig", color: CTW.action, symbol: "exclamationmark.2") }
                 if let cat = thread.category {
                     Badge(text: cat, color: CTW.grey500,
@@ -113,6 +119,36 @@ struct ThreadDetailView: View {
                 Label(thread.counterpart, systemImage: "person.crop.circle").foregroundStyle(CTW.muted)
                 Label("\(thread.messageCount)", systemImage: "envelope").foregroundStyle(CTW.muted)
                 Spacer()
+                Menu {
+                    ForEach(engine.settings.categories) { c in
+                        Button { Task { await engine.changeCategory(of: thread, to: c.name) } } label: {
+                            Label(c.name, systemImage: c.name == thread.category ? "checkmark" : c.symbolName)
+                        }
+                    }
+                } label: {
+                    Label("Kategorie", systemImage: "tag.fill")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Kategorie ändern – MailPilot sortiert die Mail um und merkt sich das")
+                Menu {
+                    if let s = sender {
+                        Button { engine.toggleVIP(email: s.senderEmail, name: s.senderName) } label: {
+                            Label(senderIsVIP ? "VIP entfernen" : "Absender als VIP markieren", systemImage: "star.fill")
+                        }
+                        Button { ruleDraft = ruleDraft(for: s) } label: {
+                            Label("Regel für diesen Absender …", systemImage: "slider.horizontal.3")
+                        }
+                        Button { ruleDraft = ruleDraft(for: s, domain: true) } label: {
+                            Label("Regel für die Domain …", systemImage: "globe")
+                        }
+                    }
+                } label: {
+                    Label("Absender", systemImage: "person.crop.circle.badge.checkmark")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(sender == nil)
                 Menu {
                     ForEach(ThreadStatus.allCases) { s in
                         Button { engine.setStatus(s, for: thread) } label: { Label(s.label, systemImage: s.symbol) }
@@ -131,6 +167,15 @@ struct ThreadDetailView: View {
             }
             .font(.system(size: 12.5))
         }
+    }
+
+    private func ruleDraft(for m: StoredMessage, domain: Bool = false) -> UserRule {
+        var r = UserRule()
+        let d = RuleEngine.domain(of: m.senderEmail)
+        r.name = domain ? "Domain \(d)" : "Absender \(m.senderEmail)"
+        r.conditions = [RuleCondition(field: domain ? .domain : .sender, value: domain ? d : m.senderEmail)]
+        r.category = thread.category
+        return r
     }
 
     private func redraft() {
@@ -156,6 +201,9 @@ struct MessageRow: View {
                          color: message.isFromMe ? CTW.teal700 : CTW.accent, size: 22)
                     .accessibilityLabel(message.isFromMe ? "Gesendet" : "Empfangen")
                 Text(message.isFromMe ? "Ich" : message.senderName).fontWeight(.semibold).foregroundStyle(CTW.ink)
+                if let d = message.decidedBy, d != "Claude" {
+                    Badge(text: d, color: CTW.accent, symbol: d == "VIP" ? "star.fill" : (d == "Korrektur" ? "graduationcap.fill" : "slider.horizontal.3"))
+                }
                 Text(message.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(CTW.muted)
                 Spacer()
                 Label("\(message.account) / \(message.mailbox)", systemImage: "folder")

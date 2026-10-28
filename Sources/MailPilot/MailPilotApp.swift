@@ -3,7 +3,11 @@ import SwiftUI
 @main
 enum EntryPoint {
     static func main() {
-        if CommandLine.arguments.contains("--selftest") {
+        if CommandLine.arguments.contains("--selftest-rules") {
+            RulesSelfTest.run()
+        } else if CommandLine.arguments.contains("--selftest-sync") {
+            RulesSelfTest.runSync()
+        } else if CommandLine.arguments.contains("--selftest") {
             SelfTest.run()
         } else if let i = CommandLine.arguments.firstIndex(of: "--render"), i + 1 < CommandLine.arguments.count {
             MainActor.assumeIsolated { RenderPreview.run(to: CommandLine.arguments[i + 1]) }
@@ -126,6 +130,7 @@ enum RenderPreview {
         Task { @MainActor in
             await engine.refreshAccounts()
             engine.reload()
+            engine.loadPreviewSamples()
             let out = URL(fileURLWithPath: dir)
             try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
             let thread = engine.threads.first { $0.draft != nil } ?? engine.threads.first { $0.messageCount > 1 } ?? engine.threads.first
@@ -134,6 +139,7 @@ enum RenderPreview {
                 render(MenuBarView(), size: NSSize(width: 360, height: 420), dark: dark, to: out.appendingPathComponent("menubar-\(suffix).png"))
                 render(DashboardView(initial: .all), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("dashboard-\(suffix).png"))
                 render(DashboardView(initial: .briefing), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("briefing-\(suffix).png"))
+                render(DashboardView(initial: .rules), size: NSSize(width: 1240, height: 1500), dark: dark, to: out.appendingPathComponent("rules-\(suffix).png"))
                 render(DashboardView(initial: .settings), size: NSSize(width: 1240, height: 900), dark: dark, to: out.appendingPathComponent("settings-\(suffix).png"))
                 if let thread {
                     render(ThreadDetailView(thread: thread), size: NSSize(width: 760, height: 900), dark: dark, to: out.appendingPathComponent("thread-\(suffix).png"))

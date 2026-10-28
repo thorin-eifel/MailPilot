@@ -3,6 +3,9 @@
 Menüleisten-App mit Dashboard, die Apple Mail mit Claude automatisiert:
 
 - **Auto-Sortierung** – jede neue Mail wird von Claude kategorisiert, bei Bedarf in `Claude/<Kategorie>` im selben Konto verschoben und mit einer Flagge markiert.
+- **Eigene Regeln & VIP** – Absender, Domain, Betreff-/Text-Stichwort oder Empfänger → Kategorie, Ordner, Priorität, Flagge oder „im Posteingang lassen“. Regeln gehen vor Claude (erste Regel gewinnt je Feld); die VIP-Liste hebt die Priorität immer auf „hoch“, markiert und meldet. Per Knopfdruck auch auf vorhandene Mails anwendbar.
+- **Lernen aus Korrekturen** – Legst du eine einsortierte Mail in Mail in einen anderen Kategorie-Ordner oder zurück in den Posteingang (oder änderst die Kategorie im Gespräch), erkennt MailPilot das, gibt Claude die Korrektur als Hinweis und schlägt nach wiederholten Korrekturen eine Regel vor (2× je Absender, 3 Absender je Domain).
+- **Verschiebe-Schutz** – Nach jedem Verschieben prüft MailPilot, ob die Mail im Zielordner angekommen ist. Konten, deren Zielordner sich nicht zurücklesen lassen (z. B. manche Exchange/IMAP-Konten mit Unterordnern), werden nur noch markiert, nicht verschoben. Neue Konten starten mit einer Probe-Mail; bereits einsortierte Mails dienen als Stichprobe. In den Einstellungen zeigt jedes Konto seinen Status, „Erneut prüfen“ wiederholt den Test.
 - **Gesprächs-Tracking** – Mails werden über `References`/`In-Reply-To` (oder Betreff + Gegenseite) zu Gesprächen gruppiert. Pro Gespräch pflegt Claude Status (*Antwort nötig*, *Wartet auf Antwort*, *Info*, *Erledigt*), Zusammenfassung, nächsten Schritt und Frist.
 - **Follow-ups** – Gespräche, in denen du seit X Tagen auf Antwort wartest, werden als überfällig markiert und gemeldet.
 - **Tägliches Briefing** – ab einer einstellbaren Uhrzeit fasst Claude den Tag zusammen.
@@ -26,7 +29,14 @@ Optional: Das CTW-Logo als `Resources/ctw-logo.png` ablegen – es ist nicht im 
 
 Beim ersten Start fragt macOS, ob MailPilot Mail steuern darf → **Erlauben**. (Nach jedem Neubau kann die Abfrage erneut kommen, weil die App nur ad-hoc signiert ist.)
 
-Selbsttest ohne Änderungen an Mail:
+Tests ohne Änderungen an Mail:
+
+```bash
+.build/release/MailPilot --selftest-rules        # Regeln, VIP, Lernen (39 Prüfungen)
+.build/release/MailPilot --selftest-sync --all   # liest Ordner/Posteingang, Trockenlauf der Korrekturerkennung
+```
+
+Selbsttest der Mail- und Claude-Anbindung:
 
 ```bash
 .build/release/MailPilot --selftest --analyze

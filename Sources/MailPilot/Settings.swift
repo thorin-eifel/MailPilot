@@ -45,6 +45,14 @@ struct AppSettings: Codable, Equatable {
     var categories: [CategoryRule] = CategoryRule.defaults
     /// Konten, auf denen MailPilot arbeitet. `nil` = alle Konten in Mail.
     var enabledAccounts: [String]?
+    /// Eigene Regeln (Reihenfolge = Vorrang) und VIP-Liste.
+    var rules: [UserRule] = []
+    var vips: [VIPEntry] = []
+    var vipFlagEnabled = true
+    var vipFlagColor: FlagColor = .red
+    var vipNotify = true
+    /// Korrekturen in Mail oder im Dashboard erkennen und daraus Regeln vorschlagen.
+    var learnFromCorrections = true
 
     func isEnabled(_ account: String) -> Bool {
         enabledAccounts.map { $0.contains(account) } ?? true
@@ -119,5 +127,11 @@ extension AppSettings {
         customInstructions = v(.customInstructions, customInstructions)
         categories = v(.categories, categories)
         enabledAccounts = (try? c.decodeIfPresent([String].self, forKey: .enabledAccounts)) ?? nil
+        rules = v(.rules, rules)
+        vips = v(.vips, vips)
+        vipFlagEnabled = v(.vipFlagEnabled, vipFlagEnabled)
+        vipFlagColor = v(.vipFlagColor, vipFlagColor)
+        vipNotify = v(.vipNotify, vipNotify)
+        learnFromCorrections = v(.learnFromCorrections, learnFromCorrections)
     }
 }
