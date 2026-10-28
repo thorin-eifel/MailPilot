@@ -96,7 +96,7 @@ Zahlen neben den Einträgen zeigen offene Punkte: Gespräche mit Antwortbedarf, 
 
 ### Postfach (eigener Mail-Client, Vorabversion)
 
-Unter **Postfach** liest MailPilot Mails direkt per IMAP, ohne Apple Mail. Derzeit unterstützt: iCloud (und Server mit Implicit TLS auf Port 993); nur Lesen, noch kein Senden.
+Unter **Postfach** liest MailPilot Mails direkt per IMAP, ohne Apple Mail. Derzeit unterstützt: iCloud. Lesen und Senden (SMTP).
 
 1. Erzeuge unter appleid.apple.com → Anmeldung und Sicherheit → App-spezifische Passwörter ein Passwort für MailPilot.
 2. *Postfach → iCloud-Konto hinzufügen*: iCloud-Adresse und dieses Passwort eingeben. Das Passwort liegt im Schlüsselbund, nicht in den Einstellungen.
@@ -104,7 +104,11 @@ Unter **Postfach** liest MailPilot Mails direkt per IMAP, ohne Apple Mail. Derze
 
 Beim ersten Abgleich lädt MailPilot die neuesten 200 Nachrichten je Ordner. Eine Nachricht wird beim Öffnen als gelesen markiert (auch auf dem Server). HTML-Mails erscheinen ohne Skripte, externe Bilder und Inhalte sind blockiert, bis du *Laden* klickst. Anhänge speicherst du per Klick.
 
-Noch nicht enthalten: Senden und Antworten, Suche und KI-Funktionen für diese Konten, Verschieben, Löschen, Exchange und Gmail.
+**Schreiben:** *Neue Nachricht* (⇧⌘N) in der Symbolleiste, *Antworten*, *Allen antworten* und *Weiterleiten* über die Symbole neben dem Datum. Du kannst Cc/Bcc und Anhänge hinzufügen. Gesendet wird erst auf *Senden* (⌘↩). MailPilot sendet über `smtp.mail.me.com` (Port 587, STARTTLS) mit der vollen iCloud-Adresse und legt eine Kopie im Ordner „Gesendet“ ab. Beantwortete Mails erhalten die Markierung „beantwortet“. *Entwurf sichern* legt den Text im Ordner „Entwürfe“ ab; ein erneutes Sichern ersetzt die frühere Fassung. Das Feld „Name im Absender“ legst du beim Hinzufügen des Kontos fest.
+
+Der Text wird als reiner Text gesendet (UTF-8). Anhänge über 20 MB lehnen viele Server ab.
+
+Noch nicht enthalten: Suche und KI-Funktionen für diese Konten, Verschieben, Löschen, Signaturen, formatierter Text, Exchange und Gmail.
 
 ---
 

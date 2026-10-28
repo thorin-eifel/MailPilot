@@ -9,11 +9,36 @@ struct ClientAccount: Codable, Identifiable, Hashable {
     var username: String
     var host: String
     var port: UInt16 = 993
+    /// Anzeigename im Absender („Anna Beispiel <anna@icloud.com>“).
+    var displayName = ""
+    var smtpHost = "smtp.mail.me.com"
+    var smtpPort: UInt16 = 587
+    var smtpSecurity: SMTPSecurity = .startTLS
 
     static let iCloudHost = "imap.mail.me.com"
 
-    static func iCloud(email: String) -> ClientAccount {
-        ClientAccount(name: "iCloud", email: email, username: email, host: iCloudHost)
+    init(id: UUID = UUID(), name: String, email: String, username: String, host: String, port: UInt16 = 993, displayName: String = "") {
+        self.id = id; self.name = name; self.email = email; self.username = username; self.host = host; self.port = port
+        self.displayName = displayName
+    }
+
+    /// Tolerant lesen: Konten aus früheren Versionen ohne die SMTP-Felder bleiben erhalten.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decode(String.self, forKey: .name)
+        email = try c.decode(String.self, forKey: .email)
+        username = try c.decodeIfPresent(String.self, forKey: .username) ?? email
+        host = try c.decode(String.self, forKey: .host)
+        port = try c.decodeIfPresent(UInt16.self, forKey: .port) ?? 993
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName) ?? ""
+        smtpHost = try c.decodeIfPresent(String.self, forKey: .smtpHost) ?? "smtp.mail.me.com"
+        smtpPort = try c.decodeIfPresent(UInt16.self, forKey: .smtpPort) ?? 587
+        smtpSecurity = try c.decodeIfPresent(SMTPSecurity.self, forKey: .smtpSecurity) ?? .startTLS
+    }
+
+    static func iCloud(email: String, displayName: String = "") -> ClientAccount {
+        ClientAccount(name: "iCloud", email: email, username: email, host: iCloudHost, displayName: displayName)
     }
 
     var isICloud: Bool { host == Self.iCloudHost }
@@ -24,6 +49,8 @@ struct ClientAccount: Codable, Identifiable, Hashable {
         if isICloud, let local = username.split(separator: "@").first, String(local) != username { names.append(String(local)) }
         return names
     }
+
+    var smtpConfig: SMTPConfig { SMTPConfig(host: smtpHost, port: smtpPort, security: smtpSecurity) }
 }
 
 enum Keychain {

@@ -321,4 +321,53 @@ actor IMAPClient {
             _ = try await rawRun("UID STORE \(uid) \(on ? "+" : "-")FLAGS.SILENT (\(flag))")
         }
     }
+
+    /// Nachricht in einen Ordner legen (Gesendet, Entwürfe). Rückgabe: die neue UID, wenn der Server UIDPLUS kennt.
+    @discardableResult
+    func append(_ path: String, flags: [String], message: Data) async throws -> UInt32? {
+        try await exclusive {
+            tagCounter += 1
+            let tag = "A\(tagCounter)"
+            let literalPlus = capabilities.contains("LITERAL+")
+            let flagText = flags.isEmpty ? "" : " (\(flags.joined(separator: " ")))"
+            let cmd = "\(tag) APPEND \(IMAPCodec.quote(IMAPCodec.encodeFolderName(path)))\(flagText) {\(message.count)\(literalPlus ? "+" : "")}\r\n"
+            try await send(Data(cmd.utf8))
+            let prefix = Array((tag + " ").utf8)
+            if !literalPlus {
+                // Auf die Aufforderung „+“ warten, bevor die Nachricht gesendet wird.
+                while true {
+                    let unit = try await readUnit(timeout: 30)
+                    if unit.first == 43 { break }
+                    if unit.starts(with: prefix) {
+                        throw IMAPError.command(String(decoding: unit.dropFirst(prefix.count), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+                    }
+                }
+            }
+            var payload = message
+            payload.append(contentsOf: [13, 10])
+            try await send(payload)
+            while true {
+                let unit = try await readUnit(timeout: 120)
+                guard unit.starts(with: prefix) else { continue }
+                let rest = String(decoding: unit.dropFirst(prefix.count), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard rest.uppercased().hasPrefix("OK") else { throw IMAPError.command(rest) }
+                guard let r = rest.range(of: "[APPENDUID ") else { return nil }
+                let parts = rest[r.upperBound...].prefix { $0 != "]" }.split(separator: " ")
+                return parts.count == 2 ? UInt32(parts[1]) : nil
+            }
+        }
+    }
+
+    /// Nachricht endgültig vom Server entfernen (als gelöscht markieren und expungen).
+    func deleteMessage(_ path: String, uid: UInt32) async throws {
+        try await exclusive {
+            if selected != path { try await select(path) }
+            _ = try await rawRun("UID STORE \(uid) +FLAGS.SILENT (\\Deleted)")
+            if capabilities.contains("UIDPLUS") {
+                _ = try await rawRun("UID EXPUNGE \(uid)")
+            } else {
+                _ = try await rawRun("EXPUNGE")
+            }
+        }
+    }
 }

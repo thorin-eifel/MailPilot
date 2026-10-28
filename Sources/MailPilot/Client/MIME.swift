@@ -73,6 +73,7 @@ struct MailHeaderInfo {
     var messageId = ""
     var inReplyTo = ""
     var references: [String] = []
+    var replyTo: [String] = []
 }
 
 enum MIME {
@@ -409,6 +410,7 @@ enum MIME {
         }
         info.to = splitAddresses(decodeWords(h("To") ?? ""))
         info.cc = splitAddresses(decodeWords(h("Cc") ?? ""))
+        info.replyTo = splitAddresses(decodeWords(h("Reply-To") ?? ""))
         info.date = h("Date").flatMap(parseDate)
         info.messageId = messageIDs(h("Message-ID") ?? "").first ?? ""
         info.inReplyTo = messageIDs(h("In-Reply-To") ?? "").first ?? ""

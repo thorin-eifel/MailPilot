@@ -35,12 +35,14 @@ extension Store {
         let cal = Calendar.current
         let today = cal.startOfDay(for: now)
         guard let first = cal.date(byAdding: .day, value: -(days - 1), to: today) else { return [] }
-        let rows = (try? db.query("""
-            SELECT CAST((ts - ?) / 86400 AS INTEGER) AS d, COUNT(*) AS n, SUM(input_tokens + output_tokens) AS t FROM usage
-            WHERE ts >= ? GROUP BY d
-            """, [first.timeIntervalSince1970, first])) ?? []
+        // Nach Kalendertagen zählen, nicht in 86400-Sekunden-Schritten: Bei Zeitumstellung hat ein Tag 23 oder 25 Stunden.
+        let rows = (try? db.query("SELECT ts, input_tokens + output_tokens AS t FROM usage WHERE ts >= ?", [first])) ?? []
         var byIndex: [Int: (Int, Int)] = [:]
-        for r in rows { byIndex[r.int("d")] = (r.int("n"), r.int("t")) }
+        for r in rows {
+            let i = cal.dateComponents([.day], from: first, to: cal.startOfDay(for: r.date("ts"))).day ?? 0
+            let old = byIndex[i] ?? (0, 0)
+            byIndex[i] = (old.0 + 1, old.1 + r.int("t"))
+        }
         return (0..<days).compactMap { i in
             guard let day = cal.date(byAdding: .day, value: i, to: first) else { return nil }
             return UsageByDay(day: day, calls: byIndex[i]?.0 ?? 0, tokens: byIndex[i]?.1 ?? 0)

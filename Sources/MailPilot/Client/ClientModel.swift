@@ -61,6 +61,8 @@ final class ClientModel: ObservableObject {
         if selectedFolder?.account == key(account) { selectedFolder = nil; messages = [] }
     }
 
+    func connectedClient(_ account: ClientAccount) async throws -> IMAPClient { try await connected(account) }
+
     private func connected(_ account: ClientAccount) async throws -> IMAPClient {
         if let c = clients[account.id] { return c }
         guard let password = Keychain.password(for: account) else { throw IMAPError.auth("Kein Passwort im Schlüsselbund. Konto bitte neu hinzufügen.") }

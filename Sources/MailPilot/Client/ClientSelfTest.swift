@@ -45,11 +45,13 @@ enum ClientSelfTest {
     static func run() {
         mimeTests()
         codecTests()
+        composeTests()
         let sema = DispatchSemaphore(value: 0)
         Task.detached {
             do {
                 try storeTests()
                 try await serverTests()
+                try await smtpTests()
             } catch {
                 check(false, "Tests liefen ohne Fehler: \(error)")
             }
@@ -242,6 +244,17 @@ enum ClientSelfTest {
         _ = try await ClientSync.syncFolder(store: store, client: client, account: "A", path: "INBOX")
         check(store.clientUIDs(account: "A", folder: "INBOX") == [201], "Abgleich: geänderte UIDVALIDITY baut den Ordner neu auf")
 
+        // Ablegen (Gesendet, Entwürfe) und Löschen
+        let draftData = Data(plainMessage.utf8)
+        let newUID = try await client.append("Entwürfe", flags: ["\\Draft", "\\Seen"], message: draftData)
+        check(newUID != nil && server.appended.count == 1 && server.appended[0].folder == "Entwürfe" && server.appended[0].flags == ["\\Draft", "\\Seen"]
+              && server.appended[0].raw == plainMessage, "Server: Nachricht per APPEND abgelegt (Ordner mit Umlaut, Flags, Inhalt unverändert)")
+        check(newUID.map { server.messages[$0] != nil } == true, "Server: APPENDUID liefert die neue UID")
+        if let uid = newUID {
+            try await client.deleteMessage("Entwürfe", uid: uid)
+            check(server.messages[uid] == nil, "Server: Nachricht gelöscht (als gelöscht markiert und expungt)")
+        }
+
         // Server weg → verständlicher Fehler
         server.stop()
         var failed = false
@@ -249,18 +262,151 @@ enum ClientSelfTest {
         check(failed, "Server: Verbindungsabbruch wird als Fehler gemeldet")
         await client.close()
     }
+
+    // MARK: Nachricht bauen und Antworten
+
+    static func parsedBuilt(_ b: MessageBuilder.Built) -> (part: MIMEPart, parsed: ParsedMessage, info: MailHeaderInfo) {
+        let raw = [UInt8](b.data)
+        let part = MIME.parse(raw)
+        return (part, MIME.extract(part), MIME.headerInfo(MIME.splitHeadBody(raw).head))
+    }
+
+    static func composeTests() {
+        var m = OutgoingMessage(fromName: "Anna \"Ä\" Beispiel", fromEmail: "anna@icloud.com", to: ["Jürgen Müller <juergen@example.org>", "\"Doe, John\" <john@example.org>"],
+                                cc: ["cc@example.org"], bcc: ["geheim@example.org"], subject: "Rückfrage zur Rechnung – bitte kurz antworten, das ist ein ziemlich langer Betreff",
+                                body: "Hallo Jürgen,\n\n.einzelner Punkt am Anfang\nGrüße = viel\u{20}\nEnde")
+        m.inReplyTo = "orig@example.org"
+        m.references = ["a@example.org", "orig@example.org"]
+        do {
+            let b = try MessageBuilder.build(m)
+            let r = parsedBuilt(b)
+            check(r.info.subject == m.subject, "Senden: Betreff mit Umlauten und Länge (RFC 2047 in mehreren Wörtern)")
+            check(r.info.fromEmail == "anna@icloud.com" && r.info.fromName == "Anna \"Ä\" Beispiel", "Senden: Absender mit Anführungszeichen und Umlaut")
+            check(r.info.to.count == 2 && r.info.to[0].contains("juergen@example.org") && r.info.to[1].contains("Doe, John"), "Senden: Empfängerliste (Komma im Namen)")
+            check(b.recipients == ["juergen@example.org", "john@example.org", "cc@example.org", "geheim@example.org"], "Senden: Umschlag enthält To, Cc und Bcc")
+            check(!String(decoding: b.data, as: UTF8.self).lowercased().contains("geheim@example.org"), "Senden: Bcc steht nicht in den Kopfzeilen")
+            check(r.info.inReplyTo == "orig@example.org" && r.info.references == ["a@example.org", "orig@example.org"], "Senden: In-Reply-To und References")
+            check(r.parsed.text == "Hallo Jürgen,\r\n\r\n.einzelner Punkt am Anfang\r\nGrüße = viel \r\nEnde", "Senden: Text unverändert (UTF-8, „=“, Leerzeichen am Zeilenende)")
+            check(b.messageID.hasSuffix("@icloud.com") && r.info.messageId == b.messageID && r.part.header("MIME-Version") == "1.0", "Senden: Message-ID und MIME-Version")
+        } catch {
+            check(false, "Senden: Nachricht bauen: \(error)")
+        }
+
+        // Kopfzeilen-Einschleusung
+        var evil = OutgoingMessage(fromEmail: "anna@icloud.com", to: ["a@x.de"], subject: "Hallo\r\nBcc: evil@x.de", body: "x")
+        evil.fromName = "Anna\r\nX-Evil: 1"
+        if let b = try? MessageBuilder.build(evil) {
+            let names = MIME.parseHeaders(MIME.splitHeadBody([UInt8](b.data)).head).map { $0.name.lowercased() }
+            check(!names.contains("bcc") && !names.contains("x-evil"), "Senden: Zeilenumbrüche in Betreff und Name schleusen keine Kopfzeilen ein")
+        } else { check(false, "Senden: Einschleusung wird neutralisiert statt abgelehnt") }
+        check((try? MessageBuilder.build(OutgoingMessage(fromEmail: "a@x.de", to: ["kein-at"], subject: "", body: ""))) == nil, "Senden: ungültige Adresse wird abgelehnt")
+        check((try? MessageBuilder.build(OutgoingMessage(fromEmail: "a@x.de", to: ["a@x.de, b@x.de"], subject: "", body: "")))?.recipients.count == 2, "Senden: Komma getrennte Empfänger in einem Feld")
+        check((try? MessageBuilder.build(OutgoingMessage(fromEmail: "a@x.de", subject: "", body: ""))) == nil, "Senden: ohne Empfänger keine Nachricht")
+        check((try? MessageBuilder.build(OutgoingMessage(fromEmail: "a@x.de", subject: "Entwurf", body: ""), requireRecipients: false)) != nil, "Senden: Entwurf ohne Empfänger möglich")
+
+        // Quoted-Printable
+        let longLine = String(repeating: "Grüße aus Trier, äöüß=! ", count: 20) + "Ende \n\nzweite Zeile  "
+        let qp = MessageBuilder.quotedPrintable(longLine)
+        let back = String(decoding: MIME.quotedPrintable(Array(qp.utf8)), as: UTF8.self)
+        check(qp.components(separatedBy: "\r\n").allSatisfy { $0.utf8.count <= 76 }, "Senden: Quoted-Printable bricht Zeilen bei 76 Zeichen")
+        check(back == longLine.replacingOccurrences(of: "\n", with: "\r\n"), "Senden: Quoted-Printable Hin und Zurück")
+
+        // Anhänge
+        let payload = Data((0..<2000).map { UInt8($0 % 251) })
+        var withFile = OutgoingMessage(fromEmail: "anna@icloud.com", to: ["a@x.de"], subject: "Mit Anhang", body: "Siehe Anhang.")
+        withFile.attachments = [OutgoingAttachment(name: "Räch nung \"1\".pdf", mime: "application/pdf", data: payload),
+                                OutgoingAttachment(name: "notiz.txt", mime: "text/plain", data: Data("Hallo".utf8))]
+        if let b = try? MessageBuilder.build(withFile) {
+            let r = parsedBuilt(b)
+            check(r.parsed.text == "Siehe Anhang." && r.parsed.attachments.count == 2, "Senden: Text und zwei Anhänge")
+            check(r.parsed.attachments.first?.name == "Räch nung \"1\".pdf" && r.parsed.attachments.first?.data == payload, "Senden: Anhang mit Umlaut im Namen, Inhalt bleibt bitgleich")
+            check(r.parsed.attachments.last?.data == Data("Hallo".utf8) && r.parsed.attachments.last?.mime == "text/plain", "Senden: Textanhang bleibt Anhang")
+        } else { check(false, "Senden: Nachricht mit Anhang bauen") }
+
+        // Punkte am Zeilenanfang
+        let stuffed = String(decoding: SMTPSession.dotStuffed(Data("a\r\n.b\r\n.\r\nc".utf8)), as: UTF8.self)
+        check(stuffed == "a\r\n..b\r\n..\r\nc\r\n.\r\n", "SMTP: Zeilen mit Punkt am Anfang werden verdoppelt, Abschluss „.“")
+
+        // Antworten und Weiterleiten
+        check(ComposeDraft.prefixed("Hallo", with: "Re:") == "Re: Hallo" && ComposeDraft.prefixed("AW: Hallo", with: "Re:") == "AW: Hallo" && ComposeDraft.prefixed("Re: x", with: "Re:") == "Re: x",
+              "Antworten: Betreff mit „Re:“ ohne Verdopplung")
+        check(ComposeDraft.prefixed("WG: Hallo", with: "Fwd:") == "WG: Hallo" && ComposeDraft.prefixed("", with: "Fwd:") == "Fwd:", "Weiterleiten: Betreff")
+        var hdr = MailHeaderInfo()
+        hdr.fromName = "Jürgen Müller"; hdr.fromEmail = "juergen@example.org"; hdr.messageId = "m1@example.org"; hdr.references = ["m0@example.org"]
+        hdr.to = ["anna@icloud.com", "Bernd <bernd@example.org>"]; hdr.cc = ["JUERGEN@example.org", "cc@example.org", "bernd@example.org"]
+        let msg = ClientMessage(account: "A", folder: "INBOX", uid: 7, messageId: "m1@example.org", inReplyTo: "", references: [], subject: "Frage", senderName: "Jürgen Müller",
+                                senderEmail: "juergen@example.org", recipients: [], date: Date(timeIntervalSince1970: 1_800_000_000), flags: [], size: 1, preview: "", hasBody: true)
+        var parsed = ParsedMessage(); parsed.text = "Zeile 1\nZeile 2"
+        let id = UUID()
+        let one = ComposeDraft.reply(to: msg, header: hdr, parsed: parsed, accountID: id, ownEmail: "anna@icloud.com", all: false)
+        check(one.to == "Jürgen Müller <juergen@example.org>" && one.cc.isEmpty && one.subject == "Re: Frage" && one.body.contains("> Zeile 1\n> Zeile 2")
+              && one.inReplyTo == "m1@example.org" && one.references == ["m0@example.org", "m1@example.org"] && one.origin?.uid == 7, "Antworten: Empfänger, Zitat, Verweise")
+        let all = ComposeDraft.reply(to: msg, header: hdr, parsed: parsed, accountID: id, ownEmail: "ANNA@icloud.com", all: true)
+        check(all.cc == "Bernd <bernd@example.org>, cc@example.org", "Allen antworten: ohne dich selbst, ohne Absender, ohne Doppelte (\(all.cc))")
+        hdr.replyTo = ["Antwort <reply@example.org>"]
+        check(ComposeDraft.reply(to: msg, header: hdr, parsed: parsed, accountID: id, ownEmail: "anna@icloud.com", all: false).to == "Antwort <reply@example.org>", "Antworten: Reply-To hat Vorrang")
+        parsed.attachments = [MailAttachment(name: "a.pdf", mime: "application/pdf", data: Data([1]), contentID: nil, isInline: false),
+                              MailAttachment(name: "logo.png", mime: "image/png", data: Data([2]), contentID: "<l>", isInline: true)]
+        let fwd = ComposeDraft.forward(msg, header: hdr, parsed: parsed, accountID: id)
+        check(fwd.subject == "Fwd: Frage" && fwd.attachments.map(\.name) == ["a.pdf"] && fwd.body.contains("Weitergeleitete Nachricht") && fwd.to.isEmpty, "Weiterleiten: Anhänge ohne eingebettete Bilder, kein Empfänger")
+
+        // Konten aus früheren Versionen
+        let legacy = #"{"id":"8D1B2E0A-0000-4000-8000-000000000009","name":"iCloud","email":"a@icloud.com","username":"a@icloud.com","host":"imap.mail.me.com","port":993}"#
+        if let acc = try? JSONDecoder().decode(ClientAccount.self, from: Data(legacy.utf8)) {
+            check(acc.smtpHost == "smtp.mail.me.com" && acc.smtpPort == 587 && acc.smtpSecurity == .startTLS && acc.displayName.isEmpty, "Konto: ältere Einstellungen ohne SMTP-Felder bleiben lesbar")
+        } else { check(false, "Konto: ältere Einstellungen ohne SMTP-Felder bleiben lesbar") }
+    }
+
+    // MARK: SMTP gegen den Testserver
+
+    static func smtpTests() async throws {
+        let smtp = FakeSMTPServer()
+        try await smtp.start()
+        let config = SMTPConfig(host: "127.0.0.1", port: smtp.port, security: .none)
+        var m = OutgoingMessage(fromEmail: "anna@icloud.com", to: ["a@example.org"], cc: ["c@example.org"], subject: "Prüfung", body: "Zeile\n.Punkt am Anfang\n.\nEnde")
+        let built = try MessageBuilder.build(m)
+
+        try await SMTPClient.send(config, user: "anna@icloud.com", password: "geheim", from: "anna@icloud.com", recipients: built.recipients, message: built.data)
+        let got = smtp.received.first
+        check(smtp.received.count == 1 && got?.from == "anna@icloud.com" && got?.recipients == ["a@example.org", "c@example.org"], "SMTP: Absender und Empfänger im Umschlag")
+        check(got?.data == built.data, "SMTP: Nachricht kommt bitgleich an (Punkte am Zeilenanfang überstehen die Übertragung)")
+        check(smtp.authUsed == "PLAIN anna@icloud.com", "SMTP: Anmeldung mit AUTH PLAIN")
+
+        smtp.advertise = "AUTH LOGIN"
+        try await SMTPClient.send(config, user: "anna@icloud.com", password: "geheim", from: "anna@icloud.com", recipients: ["a@example.org"], message: built.data)
+        check(smtp.received.count == 2 && smtp.authUsed == "LOGIN anna@icloud.com", "SMTP: Anmeldung mit AUTH LOGIN")
+
+        do { try await SMTPClient.send(config, user: "anna@icloud.com", password: "falsch", from: "anna@icloud.com", recipients: ["a@example.org"], message: built.data); check(false, "SMTP: falsches Passwort") }
+        catch SMTPError.auth { check(smtp.received.count == 2, "SMTP: falsches Passwort wird abgelehnt, nichts gesendet") }
+
+        smtp.rejected = ["b@example.org"]
+        do { try await SMTPClient.send(config, user: "anna@icloud.com", password: "geheim", from: "anna@icloud.com", recipients: ["a@example.org", "b@example.org"], message: built.data); check(false, "SMTP: abgelehnter Empfänger") }
+        catch SMTPError.rejected(let text) { check(text.contains("b@example.org") && smtp.received.count == 2, "SMTP: abgelehnter Empfänger bricht ab, nichts gesendet") }
+
+        smtp.stop()
+        do { try await SMTPClient.send(config, user: "x", password: "y", from: "a@x.de", recipients: ["b@x.de"], message: built.data); check(false, "SMTP: Server nicht erreichbar") }
+        catch { check(true, "SMTP: nicht erreichbarer Server wird als Fehler gemeldet") }
+        m.subject = ""
+    }
 }
+
 
 // MARK: - Testserver
 
 /// Minimaler IMAP-Server für Tests: ein Konto, ein Ordner mit Nachrichten, ohne TLS, nur auf der Loopback-Schnittstelle.
 final class FakeIMAPServer: @unchecked Sendable {
     struct Msg { var flags: [String]; var raw: String }
+    struct Appended { var folder: String; var flags: [String]; var raw: String }
+
+    private final class ConnState: @unchecked Sendable {
+        var append: (tag: String, folder: String, flags: [String], size: Int)?
+    }
 
     private let lock = NSLock()
     private var _messages: [UInt32: Msg] = [:]
     private var _uidValidity: UInt32 = 42
     private var _log: [String] = []
+    private var _appended: [Appended] = []
     private var listener: NWListener?
     private var connections: [NWConnection] = []
     private(set) var port: UInt16 = 0
@@ -274,6 +420,7 @@ final class FakeIMAPServer: @unchecked Sendable {
         set { lock.lock(); _uidValidity = newValue; lock.unlock() }
     }
     var log: [String] { lock.lock(); defer { lock.unlock() }; return _log }
+    var appended: [Appended] { lock.lock(); defer { lock.unlock() }; return _appended }
 
     func mutate(_ body: (FakeIMAPServer) -> Void) { body(self) }
 
@@ -303,15 +450,30 @@ final class FakeIMAPServer: @unchecked Sendable {
         lock.lock(); connections.append(c); lock.unlock()
         c.start(queue: .global())
         send(c, "* OK IMAP4rev1 Testserver bereit\r\n")
+        let state = ConnState()
         var buffer = Data()
         func receive() {
             c.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, complete, error in
                 guard let self else { return }
                 if let data { buffer.append(data) }
-                while let range = buffer.range(of: Data("\r\n".utf8)) {
+                while true {
+                    if let a = state.append {
+                        guard buffer.count >= a.size + 2 else { break }
+                        let raw = String(decoding: buffer.prefix(a.size), as: UTF8.self)
+                        buffer = Data(buffer.dropFirst(a.size + 2))
+                        state.append = nil
+                        self.lock.lock()
+                        let uid = (self._messages.keys.max() ?? 100) + 1
+                        self._messages[uid] = Msg(flags: a.flags, raw: raw)
+                        self._appended.append(Appended(folder: a.folder, flags: a.flags, raw: raw))
+                        self.lock.unlock()
+                        self.send(c, "\(a.tag) OK [APPENDUID \(self.uidValidity) \(uid)] fertig\r\n")
+                        continue
+                    }
+                    guard let range = buffer.range(of: Data("\r\n".utf8)) else { break }
                     let line = String(decoding: buffer[buffer.startIndex..<range.lowerBound], as: UTF8.self)
-                    buffer.removeSubrange(buffer.startIndex..<range.upperBound)
-                    self.handle(line, on: c)
+                    buffer = Data(buffer.dropFirst(buffer.distance(from: buffer.startIndex, to: range.upperBound)))
+                    self.handle(line, on: c, state: state)
                 }
                 if error == nil, !complete { receive() }
             }
@@ -329,7 +491,7 @@ final class FakeIMAPServer: @unchecked Sendable {
         }
     }
 
-    private func handle(_ line: String, on c: NWConnection) {
+    private func handle(_ line: String, on c: NWConnection, state: ConnState) {
         lock.lock(); _log.append(line); lock.unlock()
         let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
         guard parts.count == 2 else { return }
@@ -354,6 +516,14 @@ final class FakeIMAPServer: @unchecked Sendable {
         case "SELECT":
             let next = (msgs.keys.max() ?? 100) + 1
             send(c, "* \(msgs.count) EXISTS\r\n* OK [UIDVALIDITY \(uidValidity)] ok\r\n* OK [UIDNEXT \(next)] ok\r\n\(tag) OK [READ-WRITE] fertig\r\n")
+        case "APPEND":
+            // APPEND "Ordner" (Flags) {n}
+            let quoted = rest.split(separator: "\"", omittingEmptySubsequences: false)
+            let folder = quoted.count > 1 ? IMAPCodec.decodeFolderName(String(quoted[1])) : ""
+            let flags = rest.firstIndex(of: "(").flatMap { open in rest[rest.index(after: open)...].firstIndex(of: ")").map { rest[rest.index(after: open)..<$0].split(separator: " ").map(String.init) } } ?? []
+            let size = rest.lastIndex(of: "{").flatMap { Int(rest[rest.index(after: $0)...].prefix { $0.isNumber }) } ?? 0
+            state.append = (tag, folder, flags, size)
+            send(c, "+ bereit\r\n")
         case "LOGOUT":
             send(c, "* BYE\r\n\(tag) OK tschüss\r\n")
         case "UID":
@@ -383,12 +553,167 @@ final class FakeIMAPServer: @unchecked Sendable {
                 }
                 send(c, "\(tag) OK fertig\r\n")
             case "STORE":
+                // UID STORE <uid> +FLAGS.SILENT (\Seen)
+                let spec = args.count > 3 ? args[3] : ""
+                let flags = spec.firstIndex(of: "(").flatMap { open in spec[spec.index(after: open)...].firstIndex(of: ")").map { spec[spec.index(after: open)..<$0].split(separator: " ").map(String.init) } } ?? []
+                lock.lock()
+                for uid in expand(args[2]) {
+                    guard var m = _messages[uid] else { continue }
+                    if spec.hasPrefix("+") { m.flags = Array(Set(m.flags + flags)).sorted() }
+                    else if spec.hasPrefix("-") { m.flags.removeAll { flags.contains($0) } }
+                    _messages[uid] = m
+                }
+                lock.unlock()
+                send(c, "\(tag) OK fertig\r\n")
+            case "EXPUNGE":
+                lock.lock()
+                for uid in expand(args[2]) where _messages[uid]?.flags.contains("\\Deleted") == true { _messages[uid] = nil }
+                lock.unlock()
                 send(c, "\(tag) OK fertig\r\n")
             default:
                 send(c, "\(tag) BAD unbekannt\r\n")
             }
         default:
             send(c, "\(tag) BAD unbekannt\r\n")
+        }
+    }
+}
+
+/// Minimaler SMTP-Server für Tests (ohne TLS, nur Loopback): nimmt Nachrichten an und merkt sie sich.
+final class FakeSMTPServer: @unchecked Sendable {
+    struct Received { var from: String; var recipients: [String]; var data: Data }
+
+    private final class ConnState: @unchecked Sendable {
+        var from = ""
+        var recipients: [String] = []
+        var inData = false
+        var data = Data()
+        var loginStep = 0
+        var loginUser = ""
+    }
+
+    private let lock = NSLock()
+    private var _received: [Received] = []
+    private var _authUsed = ""
+    private var listener: NWListener?
+    private var connections: [NWConnection] = []
+    private(set) var port: UInt16 = 0
+    var advertise = "AUTH PLAIN LOGIN"
+    var rejected: Set<String> = []
+    let user = "anna@icloud.com", password = "geheim"
+
+    var received: [Received] { lock.lock(); defer { lock.unlock() }; return _received }
+    var authUsed: String { lock.lock(); defer { lock.unlock() }; return _authUsed }
+
+    func start() async throws {
+        let l = try NWListener(using: .tcp, on: .any)
+        listener = l
+        l.newConnectionHandler = { [weak self] c in self?.accept(c) }
+        final class Once: @unchecked Sendable { var done = false }
+        let once = Once()
+        port = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<UInt16, Error>) in
+            l.stateUpdateHandler = { state in
+                guard !once.done else { return }
+                if case .ready = state, let p = l.port?.rawValue { once.done = true; cont.resume(returning: p) }
+                if case .failed(let e) = state { once.done = true; cont.resume(throwing: e) }
+            }
+            l.start(queue: .global())
+        }
+    }
+
+    func stop() {
+        listener?.cancel()
+        lock.lock(); let all = connections; connections = []; lock.unlock()
+        all.forEach { $0.cancel() }
+    }
+
+    private func send(_ c: NWConnection, _ text: String) { c.send(content: Data(text.utf8), completion: .contentProcessed { _ in }) }
+
+    private func accept(_ c: NWConnection) {
+        lock.lock(); connections.append(c); lock.unlock()
+        c.start(queue: .global())
+        send(c, "220 fake ESMTP bereit\r\n")
+        let st = ConnState()
+        var buffer = Data()
+        func receive() {
+            c.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, complete, error in
+                guard let self else { return }
+                if let data { buffer.append(data) }
+                while true {
+                    if st.inData {
+                        // Ende der Daten: „<CRLF>.<CRLF>“
+                        let marker = Data("\r\n.\r\n".utf8)
+                        guard let r = buffer.range(of: marker) else { break }
+                        var body = Data(buffer[buffer.startIndex..<r.lowerBound])
+                        body.append(contentsOf: [13, 10])
+                        buffer = Data(buffer.dropFirst(buffer.distance(from: buffer.startIndex, to: r.upperBound)))
+                        // Punkte am Zeilenanfang entdoppeln
+                        var out = Data()
+                        var atStart = true
+                        var skip = false
+                        for b in body {
+                            if atStart, b == 46, !skip { skip = true; atStart = false; continue }
+                            skip = false
+                            out.append(b)
+                            atStart = b == 10
+                        }
+                        self.lock.lock(); self._received.append(Received(from: st.from, recipients: st.recipients, data: out)); self.lock.unlock()
+                        st.inData = false
+                        self.send(c, "250 angenommen\r\n")
+                        continue
+                    }
+                    guard let range = buffer.range(of: Data("\r\n".utf8)) else { break }
+                    let line = String(decoding: buffer[buffer.startIndex..<range.lowerBound], as: UTF8.self)
+                    buffer = Data(buffer.dropFirst(buffer.distance(from: buffer.startIndex, to: range.upperBound)))
+                    self.handle(line, c, st)
+                }
+                if error == nil, !complete { receive() }
+            }
+        }
+        receive()
+    }
+
+    private func decode(_ b64: String) -> String { String(data: Data(base64Encoded: b64) ?? Data(), encoding: .utf8) ?? "" }
+
+    private func handle(_ line: String, _ c: NWConnection, _ st: ConnState) {
+        if st.loginStep == 1 {
+            st.loginUser = decode(line); st.loginStep = 2
+            send(c, "334 UGFzc3dvcmQ6\r\n"); return
+        }
+        if st.loginStep == 2 {
+            st.loginStep = 0
+            if st.loginUser == user, decode(line) == password {
+                lock.lock(); _authUsed = "LOGIN \(st.loginUser)"; lock.unlock()
+                send(c, "235 angemeldet\r\n")
+            } else { send(c, "535 Anmeldung fehlgeschlagen\r\n") }
+            return
+        }
+        let upper = line.uppercased()
+        if upper.hasPrefix("EHLO") {
+            send(c, "250-fake\r\n250-SIZE 10000000\r\n250 \(advertise)\r\n")
+        } else if upper.hasPrefix("AUTH PLAIN") {
+            let fields = decode(String(line.dropFirst(11))).split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+            if fields.count == 3, fields[1] == user, fields[2] == password {
+                lock.lock(); _authUsed = "PLAIN \(fields[1])"; lock.unlock()
+                send(c, "235 angemeldet\r\n")
+            } else { send(c, "535 Anmeldung fehlgeschlagen\r\n") }
+        } else if upper.hasPrefix("AUTH LOGIN") {
+            st.loginStep = 1
+            send(c, "334 VXNlcm5hbWU6\r\n")
+        } else if upper.hasPrefix("MAIL FROM:") {
+            st.from = String(line.dropFirst(10)).trimmingCharacters(in: CharacterSet(charactersIn: "<> "))
+            st.recipients = []
+            send(c, "250 ok\r\n")
+        } else if upper.hasPrefix("RCPT TO:") {
+            let r = String(line.dropFirst(8)).trimmingCharacters(in: CharacterSet(charactersIn: "<> "))
+            if rejected.contains(r) { send(c, "550 Empfänger unbekannt\r\n") } else { st.recipients.append(r); send(c, "250 ok\r\n") }
+        } else if upper == "DATA" {
+            st.inData = true
+            send(c, "354 weiter, Ende mit <CRLF>.<CRLF>\r\n")
+        } else if upper == "QUIT" {
+            send(c, "221 tschüss\r\n")
+        } else {
+            send(c, "500 unbekannt\r\n")
         }
     }
 }

@@ -7,6 +7,7 @@ struct MailboxView: View {
     @ObservedObject private var model = ClientModel.shared
     @ViewState private var addingAccount = false
     @ViewState private var allowRemote = false
+    @ViewState private var compose: ComposeDraft?
 
     var body: some View {
         Group {
@@ -22,6 +23,7 @@ struct MailboxView: View {
         }
         .background(CTW.bg)
         .sheet(isPresented: $addingAccount) { AddAccountSheet().environmentObject(engine) }
+        .sheet(item: $compose) { ComposeSheet(draft: $0).environmentObject(engine) }
         .task {
             model.reloadFolders()
             await model.refresh()
@@ -33,6 +35,12 @@ struct MailboxView: View {
             }
         }
         .toolbar {
+            ToolbarItem {
+                Button { startNew() } label: { Label("Neue Nachricht", systemImage: "square.and.pencil") }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .disabled(engine.settings.clientAccounts.isEmpty)
+                    .help("Neue Nachricht (⇧⌘N)")
+            }
             ToolbarItem {
                 Button { Task { await model.refresh() } } label: { Label("Postfach abgleichen", systemImage: "arrow.triangle.2.circlepath") }
                     .disabled(model.busy)
@@ -172,6 +180,12 @@ struct MailboxView: View {
                 }
                 Spacer()
                 Text(m.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(CTW.muted)
+                Button { startReply(m, all: false) } label: { Image(systemName: "arrowshape.turn.up.left") }
+                    .buttonStyle(.borderless).disabled(model.opened == nil).help("Antworten").accessibilityLabel("Antworten")
+                Button { startReply(m, all: true) } label: { Image(systemName: "arrowshape.turn.up.left.2") }
+                    .buttonStyle(.borderless).disabled(model.opened == nil).help("Allen antworten").accessibilityLabel("Allen antworten")
+                Button { startForward(m) } label: { Image(systemName: "arrowshape.turn.up.right") }
+                    .buttonStyle(.borderless).disabled(model.opened == nil).help("Weiterleiten").accessibilityLabel("Weiterleiten")
                 Button { Task { await model.setRead(m, !m.isRead) } } label: {
                     Image(systemName: m.isRead ? "envelope.badge" : "envelope.open")
                 }
@@ -201,6 +215,21 @@ struct MailboxView: View {
                 .padding(.horizontal, 16).padding(.vertical, 8)
             }
         }
+    }
+
+    private func startNew() {
+        let id = model.selectedFolder.flatMap { UUID(uuidString: $0.account) } ?? engine.settings.clientAccounts.first?.id
+        if let id { compose = ComposeDraft(accountID: id) }
+    }
+
+    private func startReply(_ m: ClientMessage, all: Bool) {
+        guard let parsed = model.opened, let header = model.openedHeader, let id = UUID(uuidString: m.account), let account = model.account(id) else { return }
+        compose = .reply(to: m, header: header, parsed: parsed, accountID: id, ownEmail: account.email, all: all)
+    }
+
+    private func startForward(_ m: ClientMessage) {
+        guard let parsed = model.opened, let header = model.openedHeader, let id = UUID(uuidString: m.account) else { return }
+        compose = .forward(m, header: header, parsed: parsed, accountID: id)
     }
 
     private func save(_ a: MailAttachment) {
@@ -301,6 +330,7 @@ struct MailWebView: NSViewRepresentable {
 struct AddAccountSheet: View {
     @EnvironmentObject var engine: Engine
     @Environment(\.dismiss) private var dismiss
+    @ViewState private var displayName = ""
     @ViewState private var email = ""
     @ViewState private var password = ""
     @ViewState private var working = false
@@ -312,6 +342,7 @@ struct AddAccountSheet: View {
             Text("Erzeuge unter appleid.apple.com → Anmeldung und Sicherheit → App-spezifische Passwörter ein Passwort für MailPilot. Dein normales Apple-Passwort funktioniert hier nicht und wird nicht gebraucht.")
                 .font(.callout).foregroundStyle(CTW.muted)
             Form {
+                TextField("Name im Absender (optional)", text: $displayName)
                 TextField("iCloud-Adresse", text: $email).textContentType(.emailAddress)
                 SecureField("App-spezifisches Passwort", text: $password)
             }
@@ -326,7 +357,7 @@ struct AddAccountSheet: View {
                     working = true
                     error = nil
                     Task {
-                        let account = ClientAccount.iCloud(email: email.trimmingCharacters(in: .whitespaces))
+                        let account = ClientAccount.iCloud(email: email.trimmingCharacters(in: .whitespaces), displayName: displayName.trimmingCharacters(in: .whitespaces))
                         error = await ClientModel.shared.addAccount(account, password: password.trimmingCharacters(in: .whitespaces))
                         working = false
                         if error == nil { dismiss() }
