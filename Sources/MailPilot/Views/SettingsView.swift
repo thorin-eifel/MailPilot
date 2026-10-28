@@ -11,7 +11,7 @@ struct SettingsView: View {
         Form {
             AccountsSection()
 
-            Section("Automatik") {
+            Section(header: SectionHeader(title: "Automatik", symbol: "wand.and.stars")) {
                 Toggle("Mails automatisch in Ordner verschieben", isOn: $engine.settings.autoMove)
                 Toggle("Mails automatisch markieren (Flagge)", isOn: $engine.settings.autoFlag)
                 Toggle("Antwortentwürfe automatisch vorbereiten", isOn: $engine.settings.autoDrafts)
@@ -26,7 +26,7 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            Section("Zeitplan") {
+            Section(header: SectionHeader(title: "Zeitplan", symbol: "clock.fill")) {
                 Stepper("Alle \(engine.settings.pollMinutes) Minuten prüfen", value: $engine.settings.pollMinutes, in: 1...120)
                 Stepper("Zeitraum: letzte \(engine.settings.lookbackDays) Tage", value: $engine.settings.lookbackDays, in: 1...30)
                 Stepper("Max. \(engine.settings.maxPerCycle) Mails pro Durchlauf", value: $engine.settings.maxPerCycle, in: 5...100, step: 5)
@@ -42,7 +42,7 @@ struct SettingsView: View {
                     }
             }
 
-            Section("Claude") {
+            Section(header: SectionHeader(title: "Claude", symbol: "sparkles")) {
                 Picker("Modell", selection: $engine.settings.model) {
                     Text("Sonnet (empfohlen)").tag("sonnet")
                     Text("Haiku (schnell)").tag("haiku")
@@ -68,7 +68,7 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Kategorien") {
+            Section(header: SectionHeader(title: "Kategorien", symbol: "tag.fill")) {
                 ForEach($engine.settings.categories) { $rule in
                     CategoryEditor(rule: $rule, prefix: engine.settings.folderPrefix) {
                         engine.settings.categories.removeAll { $0.id == rule.id }
@@ -83,12 +83,15 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Daten") {
+            Section(header: SectionHeader(title: "Daten", symbol: "externaldrive.fill")) {
                 LabeledContent("Speicherort", value: Paths.appSupport.path)
                 Button("Im Finder zeigen") { NSWorkspace.shared.activateFileViewerSelecting([Paths.database]) }
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(CTW.bg)
+        .tint(CTW.accent)
         .navigationTitle("Einstellungen")
     }
 }
@@ -101,6 +104,19 @@ struct CategoryEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
+                Menu {
+                    ForEach(CategoryRule.symbolChoices, id: \.self) { sym in
+                        Button { rule.icon = sym } label: { Label(sym, systemImage: sym) }
+                    }
+                    Divider()
+                    Button("Automatisch") { rule.icon = nil }
+                } label: {
+                    IconTile(symbol: rule.symbolName, color: CTW.accent, size: 28)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Symbol wählen")
                 TextField("Name", text: $rule.name).fontWeight(.semibold)
                 Picker("Flagge", selection: $rule.flag) {
                     Text("keine").tag(FlagColor?.none)
@@ -138,43 +154,66 @@ struct AccountsSection: View {
                     get: { engine.settings.isEnabled(account.name) },
                     set: { engine.setAccount(account.name, enabled: $0) }
                 )) {
+                    HStack(alignment: .top, spacing: 10) {
+                    IconTile(symbol: account.symbol, color: engine.settings.isEnabled(account.name) ? CTW.accent : CTW.grey500, size: 30)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(account.name).fontWeight(.medium)
+                        Text(account.name).fontWeight(.semibold).foregroundStyle(CTW.ink)
                         Text(account.emails.joined(separator: ", "))
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         HStack(spacing: 6) {
                             Text("\(account.inboxCount) Mails im Posteingang").font(.caption).foregroundStyle(.secondary)
                             if engine.settings.isEnabled(account.name) {
                                 if engine.isScanned(account.name) {
-                                    Badge(text: "Erstscan erledigt", color: .green)
+                                    Badge(text: "Erstscan erledigt", color: CTW.teal700, symbol: "checkmark")
                                 } else {
-                                    Badge(text: "Erstscan ausstehend", color: .orange)
+                                    Badge(text: "Erstscan ausstehend", color: CTW.action, symbol: "clock")
                                 }
                             }
                         }
+                    }
                     }
                 }
                 .toggleStyle(.switch)
             }
             HStack {
                 Button("Alle") { engine.settings.enabledAccounts = engine.accounts.map(\.name) }
+                    .buttonStyle(.ctwSecondary)
                 Button("Keine") { engine.settings.enabledAccounts = [] }
+                    .buttonStyle(.ctwSecondary)
                 Spacer()
                 if refreshing { ProgressView().controlSize(.small) }
-                Button("Konten neu laden") {
+                Button {
                     refreshing = true
                     Task {
                         await engine.refreshAccounts()
                         refreshing = false
                     }
+                } label: {
+                    Label("Konten neu laden", systemImage: "arrow.clockwise")
                 }
+                .buttonStyle(.ctwSecondary)
             }
         } header: {
-            Text("Konten")
+            SectionHeader(title: "Konten", symbol: "person.2.fill")
         } footer: {
             Text("MailPilot liest, sortiert und verfolgt nur Mails der aktivierten Konten. Ein neu aktiviertes Konto wird zuerst komplett gescannt und einsortiert, danach läuft der Zeitplan weiter. Deaktivierte Konten bleiben unverändert.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .task { if engine.accounts.isEmpty { await engine.refreshAccounts() } }
+    }
+}
+
+/// Abschnittsüberschrift mit Symbol im CTW-Stil.
+struct SectionHeader: View {
+    let title: String
+    let symbol: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol).foregroundStyle(CTW.accent)
+            Text(title.uppercased()).tracking(0.8)
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(CTW.muted)
     }
 }

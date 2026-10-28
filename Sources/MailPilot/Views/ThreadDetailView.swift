@@ -13,63 +13,82 @@ struct ThreadDetailView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
 
-                GroupBox("Stand") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(thread.summary.isEmpty ? "–" : thread.summary).textSelection(.enabled)
-                        if !thread.nextStep.isEmpty {
-                            Label(thread.nextStep, systemImage: "arrow.right.circle").foregroundStyle(.blue)
-                        }
-                        if let due = thread.dueDate {
-                            Label("Frist: \(due)", systemImage: "calendar").foregroundStyle(.orange)
-                        }
+                VStack(alignment: .leading, spacing: 10) {
+                    Eyebrow(text: "Stand", number: "01")
+                    Text(thread.summary.isEmpty ? "–" : thread.summary)
+                        .foregroundStyle(CTW.ink)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !thread.nextStep.isEmpty {
+                        Label(thread.nextStep, systemImage: "arrow.right.circle.fill")
+                            .foregroundStyle(CTW.accent)
+                            .fontWeight(.medium)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(4)
+                    if let due = thread.dueDate {
+                        Label("Frist: \(due)", systemImage: "calendar").foregroundStyle(CTW.accent)
+                    }
                 }
+                .ctwCard()
 
-                GroupBox("Antwortentwurf") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        TextEditor(text: $draft)
-                            .font(.body)
-                            .frame(minHeight: 160)
-                            .scrollContentBackground(.hidden)
-                            .background(.background, in: RoundedRectangle(cornerRadius: 6))
-                        HStack {
-                            TextField("Anweisung an Claude, z. B. „kürzer, Termin Dienstag vorschlagen“", text: $hint)
-                                .textFieldStyle(.roundedBorder)
-                                .onSubmit(redraft)
-                            Button(draft.isEmpty ? "Entwurf erstellen" : "Neu schreiben", action: redraft)
-                                .disabled(working)
-                        }
-                        HStack {
-                            if working { ProgressView().controlSize(.small) }
-                            Spacer()
-                            Button("Speichern") { engine.saveDraft(draft, for: thread) }
-                                .disabled(draft == (thread.draft ?? ""))
-                            Button("In Mail als Antwort öffnen") {
-                                engine.saveDraft(draft, for: thread)
-                                Task { await engine.openReply(for: thread, text: draft) }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(draft.isEmpty)
-                        }
-                        Text("Mail öffnet ein Antwortfenster – gesendet wird erst, wenn du auf Senden klickst.")
-                            .font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Eyebrow(text: "Antwortentwurf", number: "02")
+                        Spacer()
+                        if working { ProgressView().controlSize(.small) }
                     }
-                    .padding(4)
+                    TextEditor(text: $draft)
+                        .font(.body)
+                        .foregroundStyle(CTW.ink)
+                        .frame(minHeight: 170)
+                        .scrollContentBackground(.hidden)
+                        .padding(8)
+                        .background(CTW.surfaceSoft, in: RoundedRectangle(cornerRadius: CTW.radius))
+                        .overlay(RoundedRectangle(cornerRadius: CTW.radius).strokeBorder(CTW.line))
+                    HStack(spacing: 8) {
+                        Image(systemName: "sparkles").foregroundStyle(CTW.accent)
+                        TextField("Anweisung an Claude, z. B. „kürzer, Termin Dienstag vorschlagen“", text: $hint)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit(redraft)
+                        Button(action: redraft) {
+                            Label(draft.isEmpty ? "Entwurf erstellen" : "Neu schreiben", systemImage: "wand.and.stars")
+                        }
+                        .buttonStyle(.ctwSecondary)
+                        .disabled(working)
+                    }
+                    HStack(spacing: 8) {
+                        Label("Gesendet wird erst, wenn du in Mail auf Senden klickst.", systemImage: "hand.raised.fill")
+                            .font(.caption).foregroundStyle(CTW.muted)
+                        Spacer()
+                        Button { engine.saveDraft(draft, for: thread) } label: {
+                            Label("Speichern", systemImage: "square.and.arrow.down")
+                        }
+                        .buttonStyle(.ctwSecondary)
+                        .disabled(draft == (thread.draft ?? ""))
+                        Button {
+                            engine.saveDraft(draft, for: thread)
+                            Task { await engine.openReply(for: thread, text: draft) }
+                        } label: {
+                            Label("In Mail öffnen", systemImage: "arrowshape.turn.up.left.fill")
+                        }
+                        .buttonStyle(.ctwPrimary)
+                        .disabled(draft.isEmpty)
+                    }
                 }
+                .ctwCard()
 
-                GroupBox("Verlauf (\(messages.count))") {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(messages.reversed()) { m in
-                            MessageRow(message: m)
-                            if m.id != messages.first?.id { Divider() }
-                        }
+                VStack(alignment: .leading, spacing: 4) {
+                    Eyebrow(text: "Verlauf · \(messages.count) Nachrichten", number: "03")
+                        .padding(.bottom, 4)
+                    ForEach(messages.reversed()) { m in
+                        MessageRow(message: m)
+                        if m.id != messages.first?.id { Divider().overlay(CTW.lineSoft) }
                     }
                 }
+                .ctwCard()
             }
             .padding(20)
         }
+        .background(CTW.bg)
         .onAppear {
             draft = thread.draft ?? ""
             messages = engine.messages(in: thread)
@@ -77,23 +96,40 @@ struct ThreadDetailView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(thread.subject.isEmpty ? "(kein Betreff)" : thread.subject).font(.title2.bold()).textSelection(.enabled)
-            HStack {
-                Text(thread.counterpart).foregroundStyle(.secondary)
-                Text("·").foregroundStyle(.secondary)
-                Text("\(thread.messageCount) Nachrichten").foregroundStyle(.secondary)
-                Spacer()
-                Picker("Status", selection: Binding(get: { thread.status }, set: { engine.setStatus($0, for: thread) })) {
-                    ForEach(ThreadStatus.allCases) { s in
-                        Label(s.label, systemImage: s.symbol).tag(s)
-                    }
-                }
-                .fixedSize()
-                if thread.status != .done {
-                    Button("Erledigt") { engine.setStatus(.done, for: thread) }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Badge(text: thread.status.label, color: thread.status.color, symbol: thread.status.symbol)
+                if thread.priority == .high { Badge(text: "Wichtig", color: CTW.action, symbol: "exclamationmark.2") }
+                if let cat = thread.category {
+                    Badge(text: cat, color: CTW.grey500,
+                          symbol: engine.settings.category(named: cat)?.symbolName ?? CategoryRule.guessSymbol(for: cat))
                 }
             }
+            Text(thread.subject.isEmpty ? "(kein Betreff)" : thread.subject)
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(CTW.ink)
+                .textSelection(.enabled)
+            HStack(spacing: 10) {
+                Label(thread.counterpart, systemImage: "person.crop.circle").foregroundStyle(CTW.muted)
+                Label("\(thread.messageCount)", systemImage: "envelope").foregroundStyle(CTW.muted)
+                Spacer()
+                Menu {
+                    ForEach(ThreadStatus.allCases) { s in
+                        Button { engine.setStatus(s, for: thread) } label: { Label(s.label, systemImage: s.symbol) }
+                    }
+                } label: {
+                    Label("Status", systemImage: "slider.horizontal.3")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                if thread.status != .done {
+                    Button { engine.setStatus(.done, for: thread) } label: {
+                        Label("Erledigt", systemImage: "checkmark")
+                    }
+                    .buttonStyle(.ctwSecondary)
+                }
+            }
+            .font(.system(size: 12.5))
         }
     }
 
@@ -115,26 +151,37 @@ struct MessageRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Image(systemName: message.isFromMe ? "arrow.up.right" : "arrow.down.left")
-                    .foregroundStyle(message.isFromMe ? .green : .blue)
-                Text(message.isFromMe ? "Ich" : message.senderName).fontWeight(.medium)
-                Text(message.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                IconTile(symbol: message.isFromMe ? "arrow.up.right" : "arrow.down.left",
+                         color: message.isFromMe ? CTW.teal700 : CTW.accent, size: 22)
+                    .accessibilityLabel(message.isFromMe ? "Gesendet" : "Empfangen")
+                Text(message.isFromMe ? "Ich" : message.senderName).fontWeight(.semibold).foregroundStyle(CTW.ink)
+                Text(message.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(CTW.muted)
                 Spacer()
-                Text("\(message.account) / \(message.mailbox)").font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                Label("\(message.account) / \(message.mailbox)", systemImage: "folder")
+                    .font(.caption2).foregroundStyle(CTW.muted).lineLimit(1)
                 if let url = message.mailURL {
-                    Button { NSWorkspace.shared.open(url) } label: { Image(systemName: "envelope.open") }
+                    Button { NSWorkspace.shared.open(url) } label: { Image(systemName: "envelope.open.fill") }
                         .buttonStyle(.borderless)
+                        .foregroundStyle(CTW.accent)
                         .help("In Mail öffnen")
                 }
             }
-            if let s = message.summary { Text(s).font(.callout) }
-            if let e = message.error { Text(e).font(.caption).foregroundStyle(.red) }
-            if expanded {
-                Text(message.content).font(.caption).textSelection(.enabled).padding(.top, 4)
+            if let s = message.summary { Text(s).font(.callout).foregroundStyle(CTW.ink).padding(.leading, 30) }
+            if let e = message.error {
+                Label(e, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(CTW.action).padding(.leading, 30)
             }
-            Button(expanded ? "Weniger" : "Volltext") { expanded.toggle() }
-                .buttonStyle(.link).font(.caption)
+            if expanded {
+                Text(message.content).font(.caption).foregroundStyle(CTW.ink).textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(CTW.surfaceSoft, in: RoundedRectangle(cornerRadius: CTW.radius))
+                    .padding(.leading, 30)
+            }
+            Button(expanded ? "Weniger" : "Volltext") {
+                withAnimation(CTW.base) { expanded.toggle() }
+            }
+            .buttonStyle(.link).font(.caption).padding(.leading, 30)
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -22,6 +22,8 @@ Menüleisten-App mit Dashboard, die Apple Mail mit Claude automatisiert:
 open build/MailPilot.app
 ```
 
+Optional: Das CTW-Logo als `Resources/ctw-logo.png` ablegen – es ist nicht im Repository enthalten. Ohne Datei zeigt die App einen Schriftzug.
+
 Beim ersten Start fragt macOS, ob MailPilot Mail steuern darf → **Erlauben**. (Nach jedem Neubau kann die Abfrage erneut kommen, weil die App nur ad-hoc signiert ist.)
 
 Selbsttest ohne Änderungen an Mail:

@@ -127,6 +127,11 @@ final class Engine: ObservableObject {
         Task {
             await refreshAccounts()
             reload()
+            // Nur Oberfläche anzeigen – kein Scan, keine Änderungen an Mail.
+            if CommandLine.arguments.contains("--ui-preview") {
+                status = "Vorschau – Automatik aus"
+                return
+            }
             if initialComplete { schedule() } else { await runInitialScan() }
         }
     }

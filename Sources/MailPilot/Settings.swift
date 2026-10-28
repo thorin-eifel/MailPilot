@@ -7,6 +7,8 @@ struct CategoryRule: Codable, Identifiable, Hashable {
     /// Zielordner (ohne Präfix). Leer = im Posteingang lassen.
     var folder: String
     var flag: FlagColor?
+    /// SF-Symbol-Name; leer = aus dem Namen abgeleitet.
+    var icon: String?
 
     static let defaults: [CategoryRule] = [
         CategoryRule(name: "Handlung nötig", description: "Jemand erwartet von mir eine Antwort, Entscheidung oder Aufgabe.", folder: "", flag: .red),

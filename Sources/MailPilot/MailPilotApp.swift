@@ -5,6 +5,8 @@ enum EntryPoint {
     static func main() {
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.run()
+        } else if let i = CommandLine.arguments.firstIndex(of: "--render"), i + 1 < CommandLine.arguments.count {
+            MainActor.assumeIsolated { RenderPreview.run(to: CommandLine.arguments[i + 1]) }
         } else {
             MailPilotApp.main()
         }
@@ -27,7 +29,7 @@ struct MailPilotApp: App {
                 .environmentObject(engine)
         } label: {
             let count = engine.needsReply.count
-            Image(systemName: engine.isRunning ? "envelope.arrow.triangle.branch" : (count > 0 ? "envelope.badge" : "envelope"))
+            Image(nsImage: MenuBarIcon.image(busy: engine.isRunning))
             if count > 0 { Text("\(count)") }
         }
         .menuBarExtraStyle(.window)
@@ -110,5 +112,49 @@ enum SelfTest {
         } catch {
             print("Analyse-Fehler: \(error.localizedDescription)")
         }
+    }
+}
+
+/// Rendert die wichtigsten Ansichten als PNG (hell und dunkel) – zur Sichtprüfung ohne Bildschirmaufnahme.
+/// Liest nur; startet weder Scan noch Zeitplan.
+@MainActor
+enum RenderPreview {
+    static func run(to dir: String) {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.prohibited)
+        let engine = Engine.shared
+        Task { @MainActor in
+            await engine.refreshAccounts()
+            engine.reload()
+            let out = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+            let thread = engine.threads.first { $0.draft != nil } ?? engine.threads.first { $0.messageCount > 1 } ?? engine.threads.first
+            for dark in [false, true] {
+                let suffix = dark ? "dark" : "light"
+                render(MenuBarView(), size: NSSize(width: 360, height: 420), dark: dark, to: out.appendingPathComponent("menubar-\(suffix).png"))
+                render(DashboardView(initial: .all), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("dashboard-\(suffix).png"))
+                render(DashboardView(initial: .briefing), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("briefing-\(suffix).png"))
+                render(DashboardView(initial: .settings), size: NSSize(width: 1240, height: 900), dark: dark, to: out.appendingPathComponent("settings-\(suffix).png"))
+                if let thread {
+                    render(ThreadDetailView(thread: thread), size: NSSize(width: 760, height: 900), dark: dark, to: out.appendingPathComponent("thread-\(suffix).png"))
+                }
+            }
+            print("Gerendert nach \(out.path)")
+            exit(0)
+        }
+        app.run()
+    }
+
+    private static func render<V: View>(_ view: V, size: NSSize, dark: Bool, to url: URL) {
+        let host = NSHostingView(rootView: view.environmentObject(Engine.shared))
+        host.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: url)
     }
 }
