@@ -164,6 +164,8 @@ struct AppSettings: Codable, Equatable {
     var maxCallsPerDay = 0
     /// Konten des eigenen Mail-Clients (Passwörter liegen im Schlüsselbund).
     var clientAccounts: [ClientAccount] = []
+    /// Konten aus Apple Mail einbeziehen. Aus: Apple Mail wird nie angesprochen (auch keine Berechtigungsabfrage).
+    var useAppleMail = true
 
     func isEnabled(_ account: String) -> Bool {
         enabledAccounts.map { $0.contains(account) } ?? true
@@ -277,5 +279,6 @@ extension AppSettings {
         sevenDayPause = v(.sevenDayPause, sevenDayPause)
         maxCallsPerDay = v(.maxCallsPerDay, maxCallsPerDay)
         clientAccounts = v(.clientAccounts, clientAccounts)
+        useAppleMail = v(.useAppleMail, useAppleMail)
     }
 }

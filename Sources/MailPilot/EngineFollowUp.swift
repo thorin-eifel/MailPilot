@@ -122,6 +122,10 @@ extension Engine {
             lastError = "Keine Empfänger für die Nachfrage gefunden."
             return
         }
+        if let account = clientAccount(named: mine.account) {
+            await clientFollowUp(account: account, to: to, subject: FollowUp.subject(for: thread.subject), body: FollowUp.body(text: text, quoting: mine), inReplyTo: mine, save: save)
+            return
+        }
         do {
             try await bridge.compose(sender: mine.sender, to: to, subject: FollowUp.subject(for: thread.subject),
                                      content: FollowUp.body(text: text, quoting: mine), save: save)

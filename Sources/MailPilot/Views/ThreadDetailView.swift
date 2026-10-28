@@ -294,6 +294,7 @@ struct ThreadDetailView: View {
 }
 
 struct MessageRow: View {
+    @EnvironmentObject var engine: Engine
     let message: StoredMessage
     @ViewState private var expanded = false
 
@@ -311,8 +312,8 @@ struct MessageRow: View {
                 Spacer()
                 Label("\(message.account) / \(message.mailbox)", systemImage: "folder")
                     .font(.caption2).foregroundStyle(CTW.muted).lineLimit(1)
-                if let url = message.mailURL {
-                    Button { NSWorkspace.shared.open(url) } label: { Image(systemName: "envelope.open.fill") }
+                if message.mailURL != nil {
+                    Button { engine.openMessage(messageId: message.messageId) } label: { Image(systemName: "envelope.open.fill") }
                         .buttonStyle(.borderless)
                         .foregroundStyle(CTW.accent)
                         .help("In Mail öffnen")

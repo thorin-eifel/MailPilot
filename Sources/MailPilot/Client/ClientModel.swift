@@ -15,6 +15,8 @@ final class ClientModel: ObservableObject {
     @Published private(set) var busy = false
     @Published var status = ""
     @Published var error: String?
+    /// Von der Analyse vorbereitete Nachricht (Antwortentwurf, Nachfrage), die das Postfach im Verfassen-Fenster zeigt.
+    @Published var pendingCompose: ComposeDraft?
 
     private var clients: [UUID: IMAPClient] = [:]
     private var running = false
@@ -76,6 +78,20 @@ final class ClientModel: ObservableObject {
         }
         clients[account.id] = c
         return c
+    }
+
+    func dropClient(_ account: ClientAccount) { drop(account) }
+
+    /// Zeigt eine Nachricht im Postfach: Ordner wählen, Nachricht markieren und öffnen.
+    func reveal(accountKey: String, messageId: String) async {
+        reloadFolders()
+        guard let loc = store.clientLocate(account: accountKey, messageId: messageId),
+              let folder = folders[accountKey]?.first(where: { $0.path == loc.folder }) else { return }
+        selectedFolder = folder
+        messages = store.clientMessages(account: accountKey, folder: folder.path)
+        guard let m = messages.first(where: { $0.uid == loc.uid }) else { return }
+        selectedMessageID = m.id
+        await open(m)
     }
 
     private func drop(_ account: ClientAccount) {

@@ -214,8 +214,8 @@ struct InvoicesView: View {
         }
         if ids.count == 1, let i = list.first {
             Button { editing = i } label: { Label("Bearbeiten …", systemImage: "pencil") }
-            if let url = URL(string: "message://" + ("<\(i.messageId)>".addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "")) {
-                Button { NSWorkspace.shared.open(url) } label: { Label("Mail öffnen", systemImage: "envelope.open") }
+            do {
+                Button { engine.openMessage(messageId: i.messageId) } label: { Label("Mail öffnen", systemImage: "envelope.open") }
             }
             Button { Task { await engine.reextractInvoice(i.id) } } label: { Label("Neu auslesen", systemImage: "arrow.clockwise") }
         }

@@ -21,7 +21,7 @@ extension Engine {
 
         var pdfs: [(name: String, text: String)] = []
         // Lässt sich die Mail oder der Anhang nicht lesen (z. B. Ordner nicht zurücklesbar), bleibt der Mailtext als Quelle.
-        if let infos = try? await bridge.attachments(account: m.account, mailbox: m.mailbox, id: m.mailId, messageId: m.messageId, saveTo: tmp) {
+        if let infos = try? await fetchAttachments(for: m, saveTo: tmp) {
             for a in infos.prefix(3) {
                 guard let path = a.saved else { continue }
                 let url = URL(fileURLWithPath: path)

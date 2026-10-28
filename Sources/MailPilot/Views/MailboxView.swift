@@ -24,6 +24,8 @@ struct MailboxView: View {
         .background(CTW.bg)
         .sheet(isPresented: $addingAccount) { AddAccountSheet().environmentObject(engine) }
         .sheet(item: $compose) { ComposeSheet(draft: $0).environmentObject(engine) }
+        .onChange(of: model.pendingCompose?.id) { _, _ in takePending() }
+        .onAppear { takePending() }
         .task {
             model.reloadFolders()
             await model.refresh()
@@ -215,6 +217,10 @@ struct MailboxView: View {
                 .padding(.horizontal, 16).padding(.vertical, 8)
             }
         }
+    }
+
+    private func takePending() {
+        if let d = model.pendingCompose { compose = d; model.pendingCompose = nil }
     }
 
     private func startNew() {

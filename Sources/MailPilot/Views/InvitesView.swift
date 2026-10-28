@@ -101,8 +101,8 @@ struct InvitesView: View {
                 } else if i.event.cancelled && i.status == "new" {
                     Button("Ausblenden") { engine.dismissInvite(i) }.buttonStyle(.ctwSecondary)
                 }
-                if let url = URL(string: "message://" + ("<\(i.messageId)>".addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "")) {
-                    Button { NSWorkspace.shared.open(url) } label: { Label("Mail", systemImage: "envelope.open") }.buttonStyle(.borderless).foregroundStyle(CTW.accent)
+                do {
+                    Button { engine.openMessage(messageId: i.messageId) } label: { Label("Mail", systemImage: "envelope.open") }.buttonStyle(.borderless).foregroundStyle(CTW.accent)
                 }
             }
         }

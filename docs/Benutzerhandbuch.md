@@ -108,7 +108,15 @@ Beim ersten Abgleich lädt MailPilot die neuesten 200 Nachrichten je Ordner. Ein
 
 Der Text wird als reiner Text gesendet (UTF-8). Anhänge über 20 MB lehnen viele Server ab.
 
-Noch nicht enthalten: Suche und KI-Funktionen für diese Konten, Verschieben, Löschen, Signaturen, formatierter Text, Exchange und Gmail.
+**Claude für Postfach-Konten:** Ein hier verbundenes Konto erscheint in *Einstellungen → Konten* als „iCloud (IMAP)“ und wird wie ein Apple-Mail-Konto verarbeitet: Kategorien, Zusammenfassungen, Gesprächsstatus, Antwort- und Nachfass-Entwürfe, Fristen, Rechnungen (PDF-Anhänge), Einladungen, Newsletter-Abmeldung, Regeln, VIP, Briefing und Wochenbericht. Posteingang und „Gesendet“ werden dafür mit dem Server abgeglichen.
+
+- **Ordnen:** MailPilot verschiebt Mails direkt auf dem Server in `Claude/<Kategorie>` und legt fehlende Ordner an. Der Verschiebe-Schutz entfällt, weil sich IMAP-Ordner zuverlässig zurücklesen lassen. Flaggen setzt MailPilot im Apple-Mail-Format (Flagge plus Farbbits), andere Programme zeigen nur „markiert“.
+- **Entwürfe:** *In Mail öffnen* zeigt den Entwurf im Verfassen-Fenster des Postfachs, *In Entwürfe legen* speichert ihn im Ordner „Entwürfe“ auf dem Server. *Mail öffnen* in den Listen springt ins Postfach.
+- **Nicht doppelt:** Aktiviere dasselbe Postfach nicht gleichzeitig über Apple Mail und als „(IMAP)“-Konto. Wer Apple Mail nicht mehr braucht, schaltet *Einstellungen → Konten → Apple Mail verwenden* aus; dann spricht MailPilot Apple Mail nie an.
+- **Erstscan:** Bei einem neuen Konto lädt MailPilot bis zu 3000 Kopfzeilen des Posteingangs und analysiert die Mails der letzten Tage (Einstellung „Erstscan“). Mailtexte werden dafür lokal zwischengespeichert.
+- **Grenzen:** Die Korrekturerkennung (Lernen aus Umsortieren) und das Archivieren setzen Server mit „/“ als Ordnertrenner voraus (iCloud). Abmelde-Angaben und Kennzeichen automatischer Mails stehen nur für Nachrichten zur Verfügung, die nach dieser Version abgeglichen wurden.
+
+Noch nicht enthalten: Suche im Postfach, Signaturen, formatierter Text, Exchange und Gmail.
 
 ---
 

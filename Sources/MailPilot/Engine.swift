@@ -22,6 +22,7 @@ final class Engine: ObservableObject {
             if persistSettings { settings.save(to: Paths.settings) }
             UsageMonitor.shared.update(settings.usageGuard)
             if oldValue.pollMinutes != settings.pollMinutes { schedule() }
+            if oldValue.clientAccounts != settings.clientAccounts || oldValue.useAppleMail != settings.useAppleMail { Task { await refreshAccounts(); reload() } }
             // Probelauf beendet: Was er nur durchgespielt hat, wird beim nächsten Durchlauf wirklich ausgeführt.
             if oldValue.dryRun, !settings.dryRun, store.releaseDryRun() > 0 { store.setValue("1", for: "catchUp") }
             if oldValue.enabledAccounts != settings.enabledAccounts { accountsChanged() }
@@ -128,11 +129,7 @@ final class Engine: ObservableObject {
     }
 
     func refreshAccounts() async {
-        do {
-            accounts = try await bridge.listAccounts()
-        } catch {
-            lastError = error.localizedDescription
-        }
+        accounts = await listAllAccounts()
     }
 
     private func accountsChanged() {
@@ -174,6 +171,8 @@ final class Engine: ObservableObject {
         moveStatus = Dictionary(uniqueKeysWithValues: accounts.compactMap { a in
             store.value("moveCheck.\(a.name)").map { (a.name, $0) }
         })
+        // Eigene IMAP-Konten: Ordner lassen sich zuverlässig verschieben und zurücklesen.
+        for a in settings.clientAccounts { moveStatus[a.engineName] = "ok" }
         corrections = (try? store.corrections(limit: 40)) ?? []
         briefing = try? store.latestBriefing()
     }
@@ -337,6 +336,8 @@ final class Engine: ObservableObject {
 
     private func initialPass(claude: ClaudeClient, accounts: [String]) async throws {
         progressAccounts = accounts
+        status = "Erstscan: gleiche Postfächer ab …"
+        await syncClientAccounts(accounts)
         var next: FetchResult? = try await fetchInitial(accounts: accounts)
         var emptyRounds = 0
         while let result = next {
@@ -366,9 +367,9 @@ final class Engine: ObservableObject {
         let sentSince = Date().addingTimeInterval(-Double(max(settings.lookbackDays, 30)) * 86400)
         // Neueste zuerst, und auf Wunsch nur die letzten X Tage: spart Claude-Aufrufe, das Wichtige kommt zuerst dran.
         let minDate = settings.initialScanDays > 0 ? Date().addingTimeInterval(-Double(settings.initialScanDays) * 86400) : nil
-        return try await bridge.fetch(since: Date(timeIntervalSince1970: 0), sentSince: sentSince, accounts: accounts,
-                                      known: known, maxNew: 150, includeSent: settings.includeSent, contentLimit: 3000,
-                                      newestFirst: true, minDate: minDate)
+        return try await fetchMail(since: Date(timeIntervalSince1970: 0), sentSince: sentSince, accounts: accounts,
+                                   known: known, maxNew: 150, includeSent: settings.includeSent, contentLimit: 3000,
+                                   newestFirst: true, minDate: minDate)
     }
 
     /// Konten, auf die sich die Fortschrittsanzeige des laufenden Erstscans bezieht.
@@ -392,11 +393,12 @@ final class Engine: ObservableObject {
 
         do {
             await wakeSnoozedThreads()
-            status = "Lese Apple Mail …"
+            status = "Lese Postfächer …"
+            await syncClientAccounts(enabledAccountNames)
             let since = Date().addingTimeInterval(-Double(settings.lookbackDays) * 86400)
             let known = try store.knownMessageIds(since: since.addingTimeInterval(-86400))
-            let result = try await bridge.fetch(since: since, accounts: enabledAccountNames, known: known, maxNew: settings.maxPerCycle,
-                                                includeSent: settings.includeSent)
+            let result = try await fetchMail(since: since, accounts: enabledAccountNames, known: known, maxNew: settings.maxPerCycle,
+                                             includeSent: settings.includeSent)
             try ingest(result)
             // Auch bei Pause oder Claude-Fehler wird angewendet, was lokal entschieden wurde; der Fehler folgt danach.
             let catchUp = store.value("catchUp") != nil || queueAgedForArchive() > 0
@@ -679,7 +681,7 @@ final class Engine: ObservableObject {
 
             guard !items.isEmpty else { continue }
             if initial || retro || catchUp { status = "\(retro ? "Regeln anwenden" : (catchUp ? "Nachholen" : "Erstscan")): sortiere \(items.count) Mails ein …" }
-            let results = try await bridge.batch(items)
+            let results = try await runBatch(items)
             var moveStats: [String: (moved: Int, lost: Int)] = [:]
             for (item, r) in zip(items, results) {
                 guard let m = byId[item.messageId] else { continue }
@@ -698,10 +700,10 @@ final class Engine: ObservableObject {
                                       dryRun: false)
                         }
                         if target == MailBridge.inboxToken {
-                            try store.updateLocation(m.messageId, mailbox: r.mailbox ?? "Posteingang", mailId: 0)
+                            try store.updateLocation(m.messageId, mailbox: r.mailbox ?? "Posteingang", mailId: r.newId ?? 0)
                             store.log(m, kind: "move", detail: "Zurück in den Posteingang gelegt", from: m.mailbox, to: nil, dryRun: false)
                         } else {
-                            try store.updateLocation(m.messageId, mailbox: target, mailId: 0)
+                            try store.updateLocation(m.messageId, mailbox: r.mailbox ?? target, mailId: r.newId ?? 0)
                             store.log(m, kind: "move", detail: "Nach „\(target)“ verschoben", from: m.mailbox, to: target, dryRun: false)
                         }
                     }
@@ -764,6 +766,10 @@ final class Engine: ObservableObject {
             lastError = "Keine eingegangene Nachricht in diesem Gespräch gefunden."
             return
         }
+        if let account = clientAccount(named: target.account) {
+            await clientReply(to: target, account: account, text: text, replyAll: target.recipients.count > 1, save: save)
+            return
+        }
         do {
             let loc = MailBridge.Location(account: target.account, mailbox: target.mailbox, mailId: target.mailId)
             try await bridge.openReply(messageId: target.messageId, at: loc, text: text, replyAll: target.recipients.count > 1, save: save)
@@ -809,8 +815,7 @@ final class Engine: ObservableObject {
         guard entry.canUndoMove, let from = entry.fromMailbox, let to = entry.toMailbox,
               let m = try? store.message(id: entry.messageId) else { return }
         do {
-            let loc = MailBridge.Location(account: m.account, mailbox: to, mailId: m.mailId)
-            let back = try await bridge.move(messageId: m.messageId, from: loc, to: from)
+            let back = try await moveMessage(m, from: to, to: from)
             try store.updateLocation(m.messageId, mailbox: back.mailbox, mailId: back.mailId)
             try store.markUndone(entry.id)
             store.log(m, kind: "undo", detail: "Zurück nach „\(from)“ verschoben", from: to, to: from, dryRun: false)

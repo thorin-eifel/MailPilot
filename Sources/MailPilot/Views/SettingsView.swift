@@ -199,6 +199,7 @@ struct AccountsSection: View {
                 }
                 .toggleStyle(.switch)
             }
+            Toggle("Apple Mail verwenden", isOn: $engine.settings.useAppleMail)
             HStack {
                 Button("Alle") { engine.settings.enabledAccounts = engine.accounts.map(\.name) }
                     .buttonStyle(.ctwSecondary)
@@ -220,7 +221,7 @@ struct AccountsSection: View {
         } header: {
             SectionHeader(title: "Konten", symbol: "person.2.fill")
         } footer: {
-            Text("MailPilot liest, sortiert und verfolgt nur Mails der aktivierten Konten. Ein neu aktiviertes Konto wird zuerst komplett gescannt und einsortiert, danach läuft der Zeitplan weiter. Deaktivierte Konten bleiben unverändert. Nach jedem Verschieben prüft MailPilot, ob die Mail im Zielordner angekommen ist; Konten, deren Zielordner sich nicht zurücklesen lassen, werden nur markiert.")
+            Text("MailPilot liest, sortiert und verfolgt nur Mails der aktivierten Konten. Ein neu aktiviertes Konto wird zuerst komplett gescannt und einsortiert, danach läuft der Zeitplan weiter. Deaktivierte Konten bleiben unverändert. Konten mit dem Zusatz „(IMAP)“ liest MailPilot direkt vom Server (Bereich „Postfach“). Aktiviere dasselbe Postfach nicht doppelt, also nicht gleichzeitig über Apple Mail und als „(IMAP)“-Konto. Ohne „Apple Mail verwenden“ spricht MailPilot Apple Mail nie an. Nach jedem Verschieben prüft MailPilot, ob die Mail im Zielordner angekommen ist; Konten, deren Zielordner sich nicht zurücklesen lassen, werden nur markiert.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .task { if engine.accounts.isEmpty { await engine.refreshAccounts() } }

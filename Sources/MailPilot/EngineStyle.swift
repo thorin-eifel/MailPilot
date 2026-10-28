@@ -39,7 +39,8 @@ extension Engine {
             for _ in 0..<10 {
                 status = "Sendeverlauf einlesen: \(added) Mails …"
                 let known = try store.knownMessageIds(since: since.addingTimeInterval(-86400))
-                let r = try await bridge.fetch(since: since, sentSince: since, accounts: enabledAccountNames, known: known, maxNew: 200,
+                await syncClientAccounts(enabledAccountNames.filter { isClientAccount($0) })
+                let r = try await fetchMail(since: since, sentSince: since, accounts: enabledAccountNames, known: known, maxNew: 200,
                                                includeSent: true, contentLimit: 3000, inbox: false)
                 for raw in r.messages {
                     let probe = StoredMessage(messageId: raw.messageId, mailId: raw.id, account: raw.account, mailbox: raw.mailbox, subject: raw.subject,

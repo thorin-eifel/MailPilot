@@ -14,7 +14,7 @@ extension Engine {
             let tmp = Paths.appSupport.appendingPathComponent("tmp/\(UUID().uuidString)", isDirectory: true)
             try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: tmp) }
-            if let infos = try? await bridge.attachments(account: m.account, mailbox: m.mailbox, id: m.mailId, messageId: m.messageId, saveTo: tmp, ics: true) {
+            if let infos = try? await fetchAttachments(for: m, saveTo: tmp, ics: true) {
                 for path in infos.compactMap(\.saved) where !path.lowercased().hasSuffix(".pdf") {
                     guard let data = FileManager.default.contents(atPath: path),
                           let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1), text.contains("BEGIN:VCALENDAR") else { continue }

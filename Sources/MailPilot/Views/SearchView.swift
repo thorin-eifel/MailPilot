@@ -106,9 +106,8 @@ struct SearchView: View {
             Text(hit.subject.isEmpty ? "(kein Betreff)" : hit.subject).font(.title2.bold()).foregroundStyle(CTW.ink)
             Text(hit.party).foregroundStyle(CTW.muted)
             Text(SearchRow.highlight(hit.snippet)).foregroundStyle(CTW.ink)
-            if let id = hit.messageId,
-               let url = URL(string: "message://" + ("<\(id)>".addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "")) {
-                Button { NSWorkspace.shared.open(url) } label: { Label("In Mail öffnen", systemImage: "envelope.open") }
+            if let id = hit.messageId {
+                Button { engine.openMessage(messageId: id) } label: { Label("In Mail öffnen", systemImage: "envelope.open") }
                     .buttonStyle(.ctwPrimary)
             }
             Spacer()

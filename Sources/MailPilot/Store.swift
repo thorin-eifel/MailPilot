@@ -151,6 +151,9 @@ final class Store: @unchecked Sendable {
             recipients TEXT, date REAL, flags TEXT, size INTEGER, preview TEXT, raw BLOB, PRIMARY KEY (account, folder, uid))
         """)
         try db.exec("CREATE INDEX IF NOT EXISTS idx_cmsg_date ON c_message(account, folder, date)")
+        try? db.exec("ALTER TABLE c_message ADD COLUMN unsub TEXT")
+        try? db.exec("ALTER TABLE c_message ADD COLUMN unsub_post TEXT")
+        try? db.exec("ALTER TABLE c_message ADD COLUMN hdr_flags TEXT")
         try db.exec("""
         CREATE TABLE IF NOT EXISTS corrections (
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, message_id TEXT, subject TEXT, account TEXT,

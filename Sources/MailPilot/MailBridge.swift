@@ -110,6 +110,8 @@ final class MailBridge: @unchecked Sendable {
         /// Zustand der Flagge vor dem Setzen (für „Rückgängig“).
         var prevFlagged: Bool?
         var prevFlagIndex: Int?
+        /// Neue UID nach dem Verschieben (nur eigener Client).
+        var newId: Int?
     }
 
     /// Spezielles Verschiebeziel: der Posteingang des jeweiligen Kontos.

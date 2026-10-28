@@ -17,6 +17,8 @@ actor IMAPClient {
     private var tagCounter = 0
     private var selected: String?
     private(set) var capabilities: Set<String> = []
+    /// Text der letzten getaggten OK-Antwort (z. B. mit `[COPYUID …]`).
+    private var lastTagged = ""
 
     private var locked = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -172,7 +174,7 @@ actor IMAPClient {
             let unit = try await readUnit(timeout: timeout)
             if unit.starts(with: prefix) {
                 let rest = String(decoding: unit.dropFirst(prefix.count), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-                if rest.uppercased().hasPrefix("OK") { return out }
+                if rest.uppercased().hasPrefix("OK") { lastTagged = rest; return out }
                 throw IMAPError.command(rest)
             }
             if unit.first == 42 { out.append(IMAPResponse(raw: unit)) }
@@ -368,6 +370,64 @@ actor IMAPClient {
             } else {
                 _ = try await rawRun("EXPUNGE")
             }
+        }
+    }
+
+    // MARK: Flags, Verschieben, Ordner, Suche
+
+    func setFlags(_ path: String, uid: UInt32, add: [String] = [], remove: [String] = []) async throws {
+        try await exclusive {
+            if selected != path { try await select(path) }
+            if !add.isEmpty { _ = try await rawRun("UID STORE \(uid) +FLAGS.SILENT (\(add.joined(separator: " ")))") }
+            if !remove.isEmpty { _ = try await rawRun("UID STORE \(uid) -FLAGS.SILENT (\(remove.joined(separator: " ")))") }
+        }
+    }
+
+    /// Ordner anlegen und abonnieren; ein bereits vorhandener Ordner ist kein Fehler.
+    func createFolder(_ path: String) async throws {
+        try await exclusive {
+            let name = IMAPCodec.quote(IMAPCodec.encodeFolderName(path))
+            do {
+                _ = try await rawRun("CREATE \(name)")
+            } catch IMAPError.command(let m) where m.uppercased().contains("ALREADYEXISTS") || m.lowercased().contains("exist") {
+                // vorhanden
+            }
+            _ = try? await rawRun("SUBSCRIBE \(name)")
+        }
+    }
+
+    /// `[COPYUID <validity> <quell-uid> <ziel-uid>]` → Ziel-UID
+    static func copyUID(_ text: String) -> UInt32? {
+        guard let r = text.range(of: "[COPYUID ") else { return nil }
+        let parts = text[r.upperBound...].prefix { $0 != "]" }.split(separator: " ")
+        return parts.count == 3 ? UInt32(parts[2]) : nil
+    }
+
+    /// Nachricht in einen anderen Ordner verschieben (MOVE, sonst COPY + Löschen). Rückgabe: neue UID, wenn der Server sie meldet.
+    @discardableResult
+    func move(_ path: String, uid: UInt32, to dest: String) async throws -> UInt32? {
+        try await exclusive {
+            if selected != path { try await select(path) }
+            let d = IMAPCodec.quote(IMAPCodec.encodeFolderName(dest))
+            if capabilities.contains("MOVE") {
+                let r = try await rawRun("UID MOVE \(uid) \(d)")
+                return Self.copyUID((r.map(\.line) + [lastTagged]).joined(separator: " "))
+            }
+            _ = try await rawRun("UID COPY \(uid) \(d)")
+            let copied = Self.copyUID(lastTagged)
+            _ = try await rawRun("UID STORE \(uid) +FLAGS.SILENT (\\Deleted)")
+            if capabilities.contains("UIDPLUS") { _ = try await rawRun("UID EXPUNGE \(uid)") } else { _ = try await rawRun("EXPUNGE") }
+            return copied
+        }
+    }
+
+    /// UID einer Nachricht anhand ihrer Message-ID im Ordner.
+    func searchMessageID(_ path: String, messageId: String) async throws -> UInt32? {
+        try await exclusive {
+            if selected != path { try await select(path) }
+            let r = try await rawRun("UID SEARCH HEADER Message-ID \(IMAPCodec.quote("<\(messageId)>"))")
+            for resp in r where resp.keyword == "SEARCH" { if let n = resp.body.dropFirst().compactMap(\.number).first { return n } }
+            return nil
         }
     }
 }

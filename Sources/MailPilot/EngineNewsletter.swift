@@ -14,7 +14,7 @@ extension Engine {
         let refs = Array(groups.keys)
         guard !refs.isEmpty else { return }
         for chunk in stride(from: 0, to: refs.count, by: 8).map({ Array(refs[$0..<min($0 + 8, refs.count)]) }) {
-            guard let states = try? await bridge.readStates(chunk) else { continue }
+            guard let states = try? await readStatesAny(chunk) else { continue }
             for (ref, byId) in states where !byId.isEmpty {
                 for m in groups[ref] ?? [] {
                     if let read = byId[m.messageId] { try? store.setRead(read, messageId: m.messageId) }
@@ -61,7 +61,7 @@ extension Engine {
             var option = UnsubOption.none
             if let h = store.latestUnsubHeader(email: c.email) {
                 option = UnsubOption.parse(header: h.header, post: h.post)
-            } else if let info = try? await bridge.unsubscribeHeader(account: m.account, mailbox: m.mailbox, id: m.mailId, messageId: m.messageId) {
+            } else if !isClientAccount(m.account), let info = try? await bridge.unsubscribeHeader(account: m.account, mailbox: m.mailbox, id: m.mailId, messageId: m.messageId) {
                 option = UnsubOption.parse(header: info.unsub, post: info.post)
             }
             try? store.saveUnsub(c.email, name: c.name, option: option)
@@ -107,6 +107,14 @@ extension Engine {
             guard let mt = UnsubOption.parseMailto(option.target) else { return .failed("Die Abmelde-Adresse ist ungültig.") }
             let msg = store.latestMessage(from: c.email)
             let own = msg?.recipients.map { MailAddress.parse($0).email }.first { myAddresses.contains($0) }
+            if let msg, let account = clientAccount(named: msg.account) {
+                var draft = ComposeDraft(accountID: account.id)
+                draft.to = mt.address; draft.subject = mt.subject; draft.body = mt.body
+                await deliver(draft, save: false)
+                try? store.saveUnsub(c.email, name: c.name, status: "done", done: Date())
+                objectWillChange.send()
+                return .opened("Abmelde-Mail vorbereitet – bitte im Postfach auf Senden klicken.")
+            }
             do {
                 try await bridge.compose(sender: own, to: [mt.address], subject: mt.subject, content: mt.body)
             } catch {

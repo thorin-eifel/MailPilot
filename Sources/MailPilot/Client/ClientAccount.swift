@@ -43,6 +43,9 @@ struct ClientAccount: Codable, Identifiable, Hashable {
 
     var isICloud: Bool { host == Self.iCloudHost }
 
+    /// Kontoname in der Analyse (Gespräche, Regeln, Einstellungen): unterscheidet sich vom gleichnamigen Konto in Apple Mail.
+    var engineName: String { "\(name) (IMAP)" }
+
     /// Anmeldenamen, die nacheinander versucht werden: bei iCloud zuerst die volle Adresse, dann der Teil vor dem @.
     var loginCandidates: [String] {
         var names = [username]

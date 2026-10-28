@@ -14,6 +14,8 @@ extension Engine {
     /// Darf MailPilot in diesem Konto Mails verschieben? Entscheidet nach gespeichertem Ergebnis, sonst anhand der
     /// bisher einsortierten Mails (lesend) und zuletzt per Probe-Mail.
     func moveGate(_ account: String) async -> MoveGate {
+        // Eigener IMAP-Client: verschiebt per UID und liest Ordner zuverlässig zurück.
+        if isClientAccount(account) { return .allowed }
         switch store.value("moveCheck.\(account)") {
         case "ok": return .allowed
         case "blocked": return .blocked
@@ -174,9 +176,9 @@ extension Engine {
                                                 location: .init(account: m.account, mailbox: m.mailbox, mailId: m.mailId),
                                                 target: target, flag: nil)
                 do {
-                    if let r = try await bridge.batch([item]).first, r.ok {
+                    if let r = try await runBatch([item]).first, r.ok {
                         let isInbox = target == MailBridge.inboxToken
-                        try? store.updateLocation(m.messageId, mailbox: isInbox ? (r.mailbox ?? "Posteingang") : target, mailId: 0)
+                        try? store.updateLocation(m.messageId, mailbox: r.mailbox ?? (isInbox ? "Posteingang" : target), mailId: r.newId ?? 0)
                         store.log(m, kind: "move", detail: isInbox ? "Zurück in den Posteingang gelegt" : "Nach „\(target)“ verschoben",
                                   from: m.mailbox, to: isInbox ? nil : target, dryRun: false)
                     } else {
@@ -211,7 +213,7 @@ extension Engine {
 
         let accounts = Set(tracked.map(\.account))
         let refs = accounts.flatMap { a in paths.map { MailBridge.FolderRef(account: a, path: $0) } }
-        guard let listing = try? await bridge.folderContents(refs) else { return }
+        guard let listing = try? await folderListing(refs) else { return }
         let sets = listing.mapValues { Set($0) }
         func ids(_ account: String, _ path: String) -> Set<String>? { sets[.init(account: account, path: path)] }
 
@@ -228,7 +230,7 @@ extension Engine {
         var inbox: [String: (inbox: String, found: Set<String>)] = [:]
         let lost = Dictionary(grouping: missing.filter { elsewhere($0) == nil }, by: \.account)
         for (account, ms) in lost {
-            if let r = try? await bridge.inboxMembership(account: account, ids: ms.map(\.messageId)) { inbox[account] = r }
+            if let r = try? await inboxMembershipAny(account: account, ids: ms.map(\.messageId)) { inbox[account] = r }
         }
 
         var learned = false
@@ -287,7 +289,7 @@ extension Engine {
             var restored = 0
             for chunk in stride(from: 0, to: items.count, by: 50).map({ Array(items[$0..<min($0 + 50, items.count)]) }) {
                 status = "Flaggen zurücknehmen: \(restored)/\(items.count)"
-                for (item, r) in zip(chunk, try await bridge.batch(chunk)) {
+                for (item, r) in zip(chunk, try await runBatch(chunk)) {
                     guard r.ok, let e = byId[item.messageId], let m = try? store.message(id: e.messageId) else { continue }
                     try store.markUndone(e.id)
                     store.log(m, kind: "undo", detail: item.restoreFlag?.flagged == true ? "Flagge auf früheren Stand zurückgesetzt" : "Flagge entfernt", dryRun: false)

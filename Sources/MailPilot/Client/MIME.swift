@@ -398,6 +398,17 @@ enum MIME {
         return nil
     }
 
+    /// Kennzeichen automatisch erzeugter Mails (für den Vorfilter): auto, bulk, list, suppress – durch Leerzeichen getrennt.
+    static func automationFlags(_ headers: [MIMEHeader]) -> String {
+        func h(_ n: String) -> String? { headers.first { $0.name.caseInsensitiveCompare(n) == .orderedSame }?.value }
+        var flags: [String] = []
+        if let auto = h("Auto-Submitted"), auto.trimmingCharacters(in: .whitespaces).lowercased() != "no" { flags.append("auto") }
+        if let prec = h("Precedence")?.trimmingCharacters(in: .whitespaces).lowercased(), ["bulk", "list", "junk"].contains(where: { prec.hasPrefix($0) }) { flags.append("bulk") }
+        if h("List-Id") != nil { flags.append("list") }
+        if h("X-Auto-Response-Suppress") != nil { flags.append("suppress") }
+        return flags.joined(separator: " ")
+    }
+
     static func headerInfo(_ head: [UInt8]) -> MailHeaderInfo {
         let headers = parseHeaders(head)
         func h(_ n: String) -> String? { headers.first { $0.name.caseInsensitiveCompare(n) == .orderedSame }?.value }

@@ -46,12 +46,14 @@ enum ClientSelfTest {
         mimeTests()
         codecTests()
         composeTests()
+        backendPureTests()
         let sema = DispatchSemaphore(value: 0)
         Task.detached {
             do {
                 try storeTests()
                 try await serverTests()
                 try await smtpTests()
+                try await backendTests()
             } catch {
                 check(false, "Tests liefen ohne Fehler: \(error)")
             }
@@ -249,10 +251,10 @@ enum ClientSelfTest {
         let newUID = try await client.append("Entwürfe", flags: ["\\Draft", "\\Seen"], message: draftData)
         check(newUID != nil && server.appended.count == 1 && server.appended[0].folder == "Entwürfe" && server.appended[0].flags == ["\\Draft", "\\Seen"]
               && server.appended[0].raw == plainMessage, "Server: Nachricht per APPEND abgelegt (Ordner mit Umlaut, Flags, Inhalt unverändert)")
-        check(newUID.map { server.messages[$0] != nil } == true, "Server: APPENDUID liefert die neue UID")
+        check(newUID.map { server.box("Entwürfe")[$0] != nil } == true, "Server: APPENDUID liefert die neue UID")
         if let uid = newUID {
             try await client.deleteMessage("Entwürfe", uid: uid)
-            check(server.messages[uid] == nil, "Server: Nachricht gelöscht (als gelöscht markiert und expungt)")
+            check(server.box("Entwürfe")[uid] == nil, "Server: Nachricht gelöscht (als gelöscht markiert und expungt)")
         }
 
         // Server weg → verständlicher Fehler
@@ -357,6 +359,146 @@ enum ClientSelfTest {
         } else { check(false, "Konto: ältere Einstellungen ohne SMTP-Felder bleiben lesbar") }
     }
 
+
+    // MARK: Anbindung an die Analyse (ClientBackend)
+
+    static func backendPureTests() {
+        for index in 0...6 {
+            let k = ClientBackend.flagKeywords(index)
+            check(ClientBackend.flagState(k.add) == (true, index), "Backend: Flaggenfarbe \(index) als Schlüsselwörter Hin und Zurück")
+        }
+        check(ClientBackend.flagState(["\\Seen"]) == (false, -1) && ClientBackend.flagState(["\\flagged", "$mailflagbit1"]) == (true, 2), "Backend: Flaggenzustand lesen (ohne Groß-/Kleinschreibung)")
+        check(ClientBackend.mapPath("Claude/Rechnungen", delimiter: "/") == "Claude/Rechnungen" && ClientBackend.mapPath("Claude/Rechnungen", delimiter: ".") == "Claude.Rechnungen",
+              "Backend: Ordnerpfad mit dem Trennzeichen des Servers")
+        check(ClientAccount(name: "iCloud", email: "a@icloud.com", username: "a@icloud.com", host: "imap.mail.me.com").engineName == "iCloud (IMAP)", "Backend: Kontoname unterscheidet sich von Apple Mail")
+        let headers = MIME.parseHeaders(Array("Auto-Submitted: auto-generated\r\nPrecedence: bulk\r\nList-Id: <x.y>\r\nX-Auto-Response-Suppress: All\r\n".utf8))
+        check(MIME.automationFlags(headers) == "auto bulk list suppress", "Backend: Kennzeichen automatischer Mails")
+        check(MIME.automationFlags(MIME.parseHeaders(Array("Auto-Submitted: no\r\nSubject: x\r\n".utf8))) == "", "Backend: „Auto-Submitted: no“ zählt nicht")
+    }
+
+    static func rawText(_ id: String, from: String, to: String, subject: String, body: String, extra: [String] = []) -> String {
+        (["From: \(from)", "To: \(to)", "Subject: \(subject)", "Date: Mon, 02 Nov 2026 09:00:00 +0100", "Message-ID: <\(id)>"] + extra
+         + ["Content-Type: text/plain; charset=utf-8", "", body, ""]).joined(separator: "\r\n")
+    }
+
+    static func backendTests() async throws {
+        let pdf = Data("%PDF-1.4 Testrechnung".utf8)
+        let news = rawText("news1@shop.example", from: "Shop <news@shop.example>", to: "anna@example.org", subject: "Angebote", body: "Herbstrabatt auf alles",
+                           extra: ["List-Unsubscribe: <https://shop.example/u/1>, <mailto:u@shop.example>", "List-Unsubscribe-Post: List-Unsubscribe=One-Click", "Precedence: bulk", "List-Id: <news.shop.example>"])
+        var inv = OutgoingMessage(fromName: "Muster IT", fromEmail: "buchhaltung@muster.example", to: ["anna@example.org"], subject: "Rechnung 4711", body: "Anbei die Rechnung.")
+        inv.messageID = "inv@example.org"
+        inv.attachments = [OutgoingAttachment(name: "Rechnung 4711.pdf", mime: "application/pdf", data: pdf)]
+        let invoice = String(decoding: try MessageBuilder.build(inv).data, as: UTF8.self)
+        let plain = rawText("plain3@example.org", from: "Bernd <bernd@example.org>", to: "anna@example.org", subject: "Frage", body: "Hast du kurz Zeit?")
+        var out = OutgoingMessage(fromEmail: "anna@example.org", to: ["bernd@example.org"], subject: "Re: Frage", body: "Ja, gern.")
+        out.messageID = "sent1@example.org"
+        let sent = String(decoding: try MessageBuilder.build(out).data, as: UTF8.self)
+
+        let server = FakeIMAPServer()
+        server.messages = [101: .init(flags: [], raw: news), 102: .init(flags: ["\\Seen"], raw: invoice), 103: .init(flags: [], raw: plain)]
+        server.setBox("Sent Messages", [201: .init(flags: ["\\Seen"], raw: sent)])
+        try await server.start()
+        let config = IMAPClient.Config(host: "127.0.0.1", port: server.port, tls: false)
+        let client = IMAPClient(config)
+        try await client.connect()
+        try await client.login(user: "anna", password: "secret")
+        let account = ClientAccount(name: "Test", email: "anna@example.org", username: "anna", host: "127.0.0.1", port: server.port)
+        let key = account.id.uuidString
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mp-backend-\(UUID()).sqlite")
+        defer { for x in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: tmp.path + x) } }
+        let store = try Store(path: tmp)
+
+        try await ClientBackend.sync(store: store, client: client, account: account, prefix: "Claude/", includeSent: true, inboxLimit: 100)
+        check(store.clientUIDs(account: key, folder: "INBOX").count == 3 && store.clientUIDs(account: key, folder: "Sent Messages") == [201], "Backend: Posteingang und Gesendet abgeglichen")
+
+        // Einlesen
+        let epoch = Date(timeIntervalSince1970: 0)
+        var params = ClientBackend.IngestParams(since: epoch, sentSince: epoch, maxNew: 10, includeSent: true, contentLimit: 3000)
+        let r = await ClientBackend.rawMessages(store: store, client: client, account: account, params: params)
+        check(r.messages.count == 4 && r.remaining == 0, "Backend: vier neue Nachrichten (drei im Posteingang, eine gesendet)")
+        let n = r.messages.first { $0.messageId == "news1@shop.example" }
+        check(n?.account == "Test (IMAP)" && n?.mailbox == "INBOX" && n?.id == 101 && n?.sender == "Shop <news@shop.example>" && n?.isSent == false && n?.read == false,
+              "Backend: Newsletter – Konto, Ordner, UID, Absender, ungelesen")
+        check(n?.unsubscribe?.contains("https://shop.example/u/1") == true && n?.unsubscribePost == "List-Unsubscribe=One-Click"
+              && n?.headerFlags?.contains("bulk") == true && n?.headerFlags?.contains("list") == true, "Backend: Abmelde-Header und Kennzeichen für den Vorfilter")
+        check(n?.content == "Herbstrabatt auf alles\r\n" || n?.content.hasPrefix("Herbstrabatt") == true, "Backend: Mailtext für Claude")
+        let i = r.messages.first { $0.messageId == "inv@example.org" }
+        check(i?.read == true && i?.content.contains("Anbei die Rechnung.") == true, "Backend: gelesene Mail mit Anhang, Text ohne Anhangsdaten")
+        let sentRaw = r.messages.first { $0.messageId == "sent1@example.org" }
+        check(sentRaw?.isSent == true && sentRaw?.mailbox == "Sent Messages" && sentRaw?.to == ["bernd@example.org"], "Backend: gesendete Mail mit Empfängern")
+
+        params.maxNew = 2
+        let few = await ClientBackend.rawMessages(store: store, client: client, account: account, params: params)
+        check(few.messages.count == 2 && few.remaining == 2, "Backend: Höchstzahl je Durchlauf, Rest wird gemeldet")
+        params.maxNew = 10; params.inbox = false
+        let onlySent = await ClientBackend.rawMessages(store: store, client: client, account: account, params: params)
+        check(onlySent.messages.count == 1 && onlySent.messages[0].isSent, "Backend: ohne Posteingang nur Gesendet")
+        params.inbox = true; params.since = Date().addingTimeInterval(5 * 365 * 86400)
+        let none = await ClientBackend.rawMessages(store: store, client: client, account: account, params: params)
+        check(none.messages.count == 1 && none.messages[0].isSent, "Backend: Zeitraum filtert den Posteingang")
+        params.since = epoch
+        for m in r.messages { try store.insert(m, myAddresses: ["anna@example.org"]) }
+        let again = await ClientBackend.rawMessages(store: store, client: client, account: account, params: params)
+        let sentStored = try store.message(id: "sent1@example.org")
+        check(again.messages.isEmpty && again.remaining == 0 && sentStored?.isFromMe == true, "Backend: übernommene Nachrichten kommen nicht wieder")
+
+        // Verschieben und Markieren
+        func item(_ id: String, _ mailbox: String, _ uid: Int, target: String? = nil, flag: FlagColor? = nil, restore: (flagged: Bool, index: Int)? = nil) -> MailBridge.BatchItem {
+            var it = MailBridge.BatchItem(messageId: id, location: .init(account: account.engineName, mailbox: mailbox, mailId: uid), target: target, flag: flag)
+            it.restoreFlag = restore
+            return it
+        }
+        let res = await ClientBackend.batch(store: store, client: client, account: account, items: [
+            item("news1@shop.example", "INBOX", 101, target: "Claude/Newsletter", flag: .blue), item("inv@example.org", "INBOX", 102, flag: .red), item("missing@example.org", "INBOX", 999)])
+        check(res[0].ok && res[0].verified == true && res[0].newId != nil && res[0].mailbox == "Claude/Newsletter" && res[0].prevFlagged == false && res[0].prevFlagIndex == -1,
+              "Backend: verschieben und blau markieren – neue UID, Ordner, früherer Flaggenzustand")
+        let moved = server.box("Claude/Newsletter").values.first
+        check(server.messages[101] == nil && moved?.flags.contains("\\Flagged") == true && moved?.flags.contains("$MailFlagBit2") == true
+              && moved?.flags.contains("$MailFlagBit0") == false && moved?.flags.contains("$MailFlagBit1") == false, "Backend: Zielordner wurde angelegt, Flagge blau (Bit 2) gesetzt")
+        check(!store.clientUIDs(account: key, folder: "INBOX").contains(101) && store.clientFolders(account: key).contains { $0.path == "Claude/Newsletter" }, "Backend: lokaler Speicher folgt der Verschiebung")
+        let red = server.messages[102]?.flags ?? []
+        check(res[1].ok && red.contains("\\Flagged") && !red.contains { $0.hasPrefix("$MailFlagBit") }, "Backend: rote Flagge ohne Farbbits")
+        check(!res[2].ok && res[2].error != nil, "Backend: unbekannte Nachricht scheitert einzeln")
+
+        _ = await ClientBackend.batch(store: store, client: client, account: account, items: [item("inv@example.org", "INBOX", 102, restore: (false, -1))])
+        check(server.messages[102]?.flags.contains("\\Flagged") == false && server.messages[102]?.flags.contains("\\Seen") == true, "Backend: Flagge zurücknehmen, Gelesen-Status bleibt")
+        _ = await ClientBackend.batch(store: store, client: client, account: account, items: [item("inv@example.org", "INBOX", 102, restore: (true, 5))])
+        let purple = server.messages[102]?.flags ?? []
+        check(purple.contains("\\Flagged") && purple.contains("$MailFlagBit0") && purple.contains("$MailFlagBit2") && !purple.contains("$MailFlagBit1"), "Backend: Flagge auf früheren Farbstand (lila) setzen")
+
+        let back = await ClientBackend.batch(store: store, client: client, account: account, items: [item("news1@shop.example", "Claude/Newsletter", Int(res[0].newId ?? 0), target: MailBridge.inboxToken)])
+        check(back[0].ok && back[0].mailbox == "INBOX" && server.box("Claude/Newsletter").isEmpty && server.messages.values.contains { $0.raw.contains("news1@shop.example") }, "Backend: zurück in den Posteingang (Rückgängig)")
+
+        // Server ohne MOVE: COPY, Löschen, Expunge
+        server.supportsMove = false
+        let copyClient = IMAPClient(config)
+        try await copyClient.connect()
+        try await copyClient.login(user: "anna", password: "secret")
+        let viaCopy = await ClientBackend.batch(store: store, client: copyClient, account: account, items: [item("plain3@example.org", "INBOX", 103, target: "Claude/Rechnungen")])
+        check(viaCopy[0].ok && viaCopy[0].verified == true && viaCopy[0].newId != nil && server.messages[103] == nil && server.box("Claude/Rechnungen").count == 1,
+              "Backend: Verschieben ohne MOVE-Unterstützung (COPY, löschen, expungen)")
+        await copyClient.close()
+
+        // Anhänge
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mp-att-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let atts = try await ClientBackend.attachments(store: store, client: client, account: account, mailbox: "INBOX", uid: 102, messageId: "inv@example.org", dir: dir, ics: false)
+        check(atts.count == 1 && atts[0].name == "Rechnung 4711.pdf" && atts[0].saved.flatMap { FileManager.default.contents(atPath: $0) } == pdf, "Backend: PDF-Anhang wird für die Rechnungsauslesung gespeichert")
+
+        // Korrekturen und Lesestatus
+        try await ClientBackend.sync(store: store, client: client, account: account, prefix: "Claude/", includeSent: true, inboxLimit: 100)
+        let listing = ClientBackend.listing(store: store, account: account, paths: ["Claude/Rechnungen", "Gibt es nicht"])
+        check(listing.keys.sorted() == ["Claude/Rechnungen"] && listing["Claude/Rechnungen"]?.contains("plain3@example.org") == true, "Backend: Ordnerinhalt für die Korrekturerkennung (fehlende Ordner fehlen)")
+        let membership = ClientBackend.inboxMembership(store: store, account: account, ids: ["news1@shop.example", "plain3@example.org"])
+        check(membership?.inbox == "INBOX" && membership?.found == ["news1@shop.example"], "Backend: Posteingangs-Zugehörigkeit")
+        let states = ClientBackend.readStates(store: store, account: account, folder: "INBOX")
+        check(states["inv@example.org"] == true && states["news1@shop.example"] == false, "Backend: Lesestatus für die Newsletter-Auswertung")
+
+        server.stop()
+        await client.close()
+    }
+
     // MARK: SMTP gegen den Testserver
 
     static func smtpTests() async throws {
@@ -393,34 +535,52 @@ enum ClientSelfTest {
 
 // MARK: - Testserver
 
-/// Minimaler IMAP-Server für Tests: ein Konto, ein Ordner mit Nachrichten, ohne TLS, nur auf der Loopback-Schnittstelle.
+/// Minimaler IMAP-Server für Tests: mehrere Ordner mit Nachrichten, ohne TLS, nur auf der Loopback-Schnittstelle.
 final class FakeIMAPServer: @unchecked Sendable {
     struct Msg { var flags: [String]; var raw: String }
     struct Appended { var folder: String; var flags: [String]; var raw: String }
+    struct Box { var messages: [UInt32: Msg] = [:]; var uidValidity: UInt32 = 42; var nextUID: UInt32 = 101 }
 
     private final class ConnState: @unchecked Sendable {
         var append: (tag: String, folder: String, flags: [String], size: Int)?
+        var selected = "INBOX"
     }
 
     private let lock = NSLock()
-    private var _messages: [UInt32: Msg] = [:]
-    private var _uidValidity: UInt32 = 42
+    private var boxes: [String: Box] = ["INBOX": Box(), "Entwürfe": Box(), "Sent Messages": Box()]
     private var _log: [String] = []
     private var _appended: [Appended] = []
+    private var _supportsMove = true
     private var listener: NWListener?
     private var connections: [NWConnection] = []
     private(set) var port: UInt16 = 0
 
+    /// Nachrichten des Posteingangs.
     var messages: [UInt32: Msg] {
-        get { lock.lock(); defer { lock.unlock() }; return _messages }
-        set { lock.lock(); _messages = newValue; lock.unlock() }
+        get { box("INBOX") }
+        set { setBox("INBOX", newValue) }
     }
     var uidValidity: UInt32 {
-        get { lock.lock(); defer { lock.unlock() }; return _uidValidity }
-        set { lock.lock(); _uidValidity = newValue; lock.unlock() }
+        get { lock.lock(); defer { lock.unlock() }; return boxes["INBOX"]?.uidValidity ?? 0 }
+        set { lock.lock(); boxes["INBOX"]?.uidValidity = newValue; lock.unlock() }
+    }
+    var supportsMove: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _supportsMove }
+        set { lock.lock(); _supportsMove = newValue; lock.unlock() }
     }
     var log: [String] { lock.lock(); defer { lock.unlock() }; return _log }
     var appended: [Appended] { lock.lock(); defer { lock.unlock() }; return _appended }
+
+    func box(_ name: String) -> [UInt32: Msg] { lock.lock(); defer { lock.unlock() }; return boxes[name]?.messages ?? [:] }
+    func boxNames() -> [String] { lock.lock(); defer { lock.unlock() }; return boxes.keys.sorted() }
+    func setBox(_ name: String, _ messages: [UInt32: Msg]) {
+        lock.lock()
+        var b = boxes[name] ?? Box()
+        b.messages = messages
+        b.nextUID = max(b.nextUID, (messages.keys.max() ?? 100) + 1)
+        boxes[name] = b
+        lock.unlock()
+    }
 
     func mutate(_ body: (FakeIMAPServer) -> Void) { body(self) }
 
@@ -463,11 +623,15 @@ final class FakeIMAPServer: @unchecked Sendable {
                         buffer = Data(buffer.dropFirst(a.size + 2))
                         state.append = nil
                         self.lock.lock()
-                        let uid = (self._messages.keys.max() ?? 100) + 1
-                        self._messages[uid] = Msg(flags: a.flags, raw: raw)
+                        var b = self.boxes[a.folder] ?? Box()
+                        let uid = b.nextUID
+                        b.nextUID += 1
+                        b.messages[uid] = Msg(flags: a.flags, raw: raw)
+                        self.boxes[a.folder] = b
                         self._appended.append(Appended(folder: a.folder, flags: a.flags, raw: raw))
+                        let validity = b.uidValidity
                         self.lock.unlock()
-                        self.send(c, "\(a.tag) OK [APPENDUID \(self.uidValidity) \(uid)] fertig\r\n")
+                        self.send(c, "\(a.tag) OK [APPENDUID \(validity) \(uid)] fertig\r\n")
                         continue
                     }
                     guard let range = buffer.range(of: Data("\r\n".utf8)) else { break }
@@ -491,38 +655,58 @@ final class FakeIMAPServer: @unchecked Sendable {
         }
     }
 
+    /// Inhalte in Anführungszeichen: `APPEND "Ordner" (…)` → ["Ordner"]
+    private func quoted(_ s: String) -> [String] {
+        s.split(separator: "\"", omittingEmptySubsequences: false).enumerated().filter { $0.offset % 2 == 1 }.map { IMAPCodec.decodeFolderName(String($0.element)) }
+    }
+
+    private func flagList(_ s: String) -> [String] {
+        guard let open = s.firstIndex(of: "("), let close = s[s.index(after: open)...].firstIndex(of: ")") else { return [] }
+        return s[s.index(after: open)..<close].split(separator: " ").map(String.init)
+    }
+
     private func handle(_ line: String, on c: NWConnection, state: ConnState) {
         lock.lock(); _log.append(line); lock.unlock()
         let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
         guard parts.count == 2 else { return }
         let tag = parts[0], rest = parts[1]
         let word = rest.split(separator: " ").first.map { $0.uppercased() } ?? ""
-        let msgs = messages
+        lock.lock(); let current = boxes[state.selected]; let move = _supportsMove; lock.unlock()
+        let msgs = current?.messages ?? [:]
         switch word {
         case "CAPABILITY":
-            send(c, "* CAPABILITY IMAP4rev1 IDLE UIDPLUS\r\n\(tag) OK fertig\r\n")
+            send(c, "* CAPABILITY IMAP4rev1 IDLE UIDPLUS\(move ? " MOVE" : "")\r\n\(tag) OK fertig\r\n")
         case "LOGIN":
             let args = rest.split(separator: " ")
             let pass = args.count > 2 ? args[2].trimmingCharacters(in: CharacterSet(charactersIn: "\"")) : ""
             send(c, pass == "secret" ? "\(tag) OK angemeldet\r\n" : "\(tag) NO [AUTHENTICATIONFAILED] falsches Passwort\r\n")
         case "LIST":
-            send(c, """
-            * LIST (\\HasNoChildren) "/" "INBOX"\r
-            * LIST (\\HasNoChildren \\Drafts) "/" "Entw&APw-rfe"\r
-            * LIST (\\HasNoChildren \\Sent) "/" "Sent Messages"\r
-            * LIST (\\Noselect \\HasChildren) "/" "Parent"\r
-            \(tag) OK fertig\r\n
-            """)
+            var out = ""
+            for name in boxNames() {
+                let attr = name == "Entwürfe" ? "\\HasNoChildren \\Drafts" : (name == "Sent Messages" ? "\\HasNoChildren \\Sent" : "\\HasNoChildren")
+                out += "* LIST (\(attr)) \"/\" \"\(IMAPCodec.encodeFolderName(name))\"\r\n"
+            }
+            out += "* LIST (\\Noselect \\HasChildren) \"/\" \"Parent\"\r\n\(tag) OK fertig\r\n"
+            send(c, out)
         case "SELECT":
-            let next = (msgs.keys.max() ?? 100) + 1
-            send(c, "* \(msgs.count) EXISTS\r\n* OK [UIDVALIDITY \(uidValidity)] ok\r\n* OK [UIDNEXT \(next)] ok\r\n\(tag) OK [READ-WRITE] fertig\r\n")
+            let name = quoted(rest).first ?? "INBOX"
+            lock.lock(); let b = boxes[name]; lock.unlock()
+            guard let b else { send(c, "\(tag) NO [NONEXISTENT] Ordner unbekannt\r\n"); return }
+            state.selected = name
+            send(c, "* \(b.messages.count) EXISTS\r\n* OK [UIDVALIDITY \(b.uidValidity)] ok\r\n* OK [UIDNEXT \(b.nextUID)] ok\r\n\(tag) OK [READ-WRITE] fertig\r\n")
+        case "CREATE":
+            let name = quoted(rest).first ?? ""
+            lock.lock()
+            let exists = boxes[name] != nil
+            if !exists { boxes[name] = Box() }
+            lock.unlock()
+            send(c, exists ? "\(tag) NO [ALREADYEXISTS] vorhanden\r\n" : "\(tag) OK angelegt\r\n")
+        case "SUBSCRIBE":
+            send(c, "\(tag) OK fertig\r\n")
         case "APPEND":
-            // APPEND "Ordner" (Flags) {n}
-            let quoted = rest.split(separator: "\"", omittingEmptySubsequences: false)
-            let folder = quoted.count > 1 ? IMAPCodec.decodeFolderName(String(quoted[1])) : ""
-            let flags = rest.firstIndex(of: "(").flatMap { open in rest[rest.index(after: open)...].firstIndex(of: ")").map { rest[rest.index(after: open)..<$0].split(separator: " ").map(String.init) } } ?? []
+            let folder = quoted(rest).first ?? ""
             let size = rest.lastIndex(of: "{").flatMap { Int(rest[rest.index(after: $0)...].prefix { $0.isNumber }) } ?? 0
-            state.append = (tag, folder, flags, size)
+            state.append = (tag, folder, flagList(rest), size)
             send(c, "+ bereit\r\n")
         case "LOGOUT":
             send(c, "* BYE\r\n\(tag) OK tschüss\r\n")
@@ -531,7 +715,13 @@ final class FakeIMAPServer: @unchecked Sendable {
             guard args.count >= 3 else { send(c, "\(tag) BAD\r\n"); return }
             switch args[1].uppercased() {
             case "SEARCH":
-                send(c, "* SEARCH \(msgs.keys.sorted().map(String.init).joined(separator: " "))\r\n\(tag) OK fertig\r\n")
+                if args[2].uppercased() == "HEADER", args.count > 3 {
+                    let wanted = args[3].replacingOccurrences(of: "Message-ID ", with: "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                    let hit = msgs.filter { $0.value.raw.contains("Message-ID: \(wanted)") }.keys.sorted()
+                    send(c, "* SEARCH \(hit.map(String.init).joined(separator: " "))\r\n\(tag) OK fertig\r\n")
+                } else {
+                    send(c, "* SEARCH \(msgs.keys.sorted().map(String.init).joined(separator: " "))\r\n\(tag) OK fertig\r\n")
+                }
             case "FETCH":
                 let items = args.count > 3 ? args[3] : ""
                 let order = msgs.keys.sorted()
@@ -553,23 +743,40 @@ final class FakeIMAPServer: @unchecked Sendable {
                 }
                 send(c, "\(tag) OK fertig\r\n")
             case "STORE":
-                // UID STORE <uid> +FLAGS.SILENT (\Seen)
                 let spec = args.count > 3 ? args[3] : ""
-                let flags = spec.firstIndex(of: "(").flatMap { open in spec[spec.index(after: open)...].firstIndex(of: ")").map { spec[spec.index(after: open)..<$0].split(separator: " ").map(String.init) } } ?? []
+                let flags = flagList(spec)
                 lock.lock()
                 for uid in expand(args[2]) {
-                    guard var m = _messages[uid] else { continue }
+                    guard var m = boxes[state.selected]?.messages[uid] else { continue }
                     if spec.hasPrefix("+") { m.flags = Array(Set(m.flags + flags)).sorted() }
                     else if spec.hasPrefix("-") { m.flags.removeAll { flags.contains($0) } }
-                    _messages[uid] = m
+                    boxes[state.selected]?.messages[uid] = m
                 }
                 lock.unlock()
                 send(c, "\(tag) OK fertig\r\n")
             case "EXPUNGE":
                 lock.lock()
-                for uid in expand(args[2]) where _messages[uid]?.flags.contains("\\Deleted") == true { _messages[uid] = nil }
+                for uid in expand(args[2]) where boxes[state.selected]?.messages[uid]?.flags.contains("\\Deleted") == true { boxes[state.selected]?.messages[uid] = nil }
                 lock.unlock()
                 send(c, "\(tag) OK fertig\r\n")
+            case "MOVE", "COPY":
+                let isMove = args[1].uppercased() == "MOVE"
+                if isMove, !move { send(c, "\(tag) BAD MOVE nicht unterstützt\r\n"); return }
+                let dest = quoted(args.count > 3 ? args[3] : "").first ?? ""
+                let src = expand(args[2]).first ?? 0
+                lock.lock()
+                guard boxes[dest] != nil, let m = boxes[state.selected]?.messages[src] else {
+                    lock.unlock()
+                    send(c, "\(tag) NO [TRYCREATE] Zielordner oder Nachricht unbekannt\r\n")
+                    return
+                }
+                let newUID = boxes[dest]!.nextUID
+                boxes[dest]!.nextUID += 1
+                boxes[dest]!.messages[newUID] = m
+                if isMove { boxes[state.selected]?.messages[src] = nil }
+                let validity = boxes[dest]!.uidValidity
+                lock.unlock()
+                send(c, isMove ? "* OK [COPYUID \(validity) \(src) \(newUID)] verschoben\r\n\(tag) OK fertig\r\n" : "\(tag) OK [COPYUID \(validity) \(src) \(newUID)] kopiert\r\n")
             default:
                 send(c, "\(tag) BAD unbekannt\r\n")
             }
