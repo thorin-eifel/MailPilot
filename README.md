@@ -6,6 +6,10 @@ Menüleisten-App mit Dashboard, die Apple Mail mit Claude automatisiert:
 - **Eigene Regeln & VIP** – Absender, Domain, Betreff-/Text-Stichwort oder Empfänger → Kategorie, Ordner, Priorität, Flagge oder „im Posteingang lassen“. Regeln gehen vor Claude (erste Regel gewinnt je Feld); die VIP-Liste hebt die Priorität immer auf „hoch“, markiert und meldet. Per Knopfdruck auch auf vorhandene Mails anwendbar.
 - **Lernen aus Korrekturen** – Legst du eine einsortierte Mail in Mail in einen anderen Kategorie-Ordner oder zurück in den Posteingang (oder änderst die Kategorie im Gespräch), erkennt MailPilot das, gibt Claude die Korrektur als Hinweis und schlägt nach wiederholten Korrekturen eine Regel vor (2× je Absender, 3 Absender je Domain).
 - **Verschiebe-Schutz** – Nach jedem Verschieben prüft MailPilot, ob die Mail im Zielordner angekommen ist. Konten, deren Zielordner sich nicht zurücklesen lassen (z. B. manche Exchange/IMAP-Konten mit Unterordnern), werden nur noch markiert, nicht verschoben. Neue Konten starten mit einer Probe-Mail; bereits einsortierte Mails dienen als Stichprobe. In den Einstellungen zeigt jedes Konto seinen Status, „Erneut prüfen“ wiederholt den Test.
+- **Zurückstellen** – Gespräche ausblenden und später wieder zeigen (heute Abend, morgen früh, Montag, in einer Woche oder frei wählbar). Eine neue Nachricht im Gespräch holt es sofort zurück; abgelaufene Zeiten melden sich per Mitteilung.
+- **Nachfass-Entwürfe** – Wird ein „wartet auf Antwort“-Gespräch überfällig, schreibt Claude automatisch eine freundliche Nachfrage. „In Mail öffnen“ legt eine neue Nachricht an dieselben Empfänger an (mit Zitat deiner letzten Mail); gesendet wird nichts.
+- **Fristen in Erinnerungen und Kalender** – Fristen aus Gesprächen (von Claude erkannt oder selbst gesetzt) landen auf Wunsch automatisch als Erinnerung (9 Uhr am Fristtag) und/oder ganztägiger Termin; jede Frist nur einmal, ohne Werbung und Newsletter. Pro Gespräch auch von Hand.
+- **Rechnungen** – Mails der Kategorie „Rechnungen“ werden samt PDF-Anhang ausgelesen (eingebetteter Text, bei Scans per Texterkennung): Aussteller, Nummer, Betrag brutto, USt, Datum, Fälligkeit. Übersicht mit Summen, offen/bezahlt/überfällig, Korrekturformular und **CSV-Export** für die Buchhaltung (Semikolon, Dezimalkomma, UTF-8). Fälligkeiten werden zur Frist des Gesprächs.
 - **Gesprächs-Tracking** – Mails werden über `References`/`In-Reply-To` (oder Betreff + Gegenseite) zu Gesprächen gruppiert. Pro Gespräch pflegt Claude Status (*Antwort nötig*, *Wartet auf Antwort*, *Info*, *Erledigt*), Zusammenfassung, nächsten Schritt und Frist.
 - **Follow-ups** – Gespräche, in denen du seit X Tagen auf Antwort wartest, werden als überfällig markiert und gemeldet.
 - **Tägliches Briefing** – ab einer einstellbaren Uhrzeit fasst Claude den Tag zusammen.
@@ -34,6 +38,12 @@ Tests ohne Änderungen an Mail:
 ```bash
 .build/release/MailPilot --selftest-rules        # Regeln, VIP, Lernen (39 Prüfungen)
 .build/release/MailPilot --selftest-sync --all   # liest Ordner/Posteingang, Trockenlauf der Korrekturerkennung
+```
+
+```bash
+.build/release/MailPilot --selftest-features     # Zurückstellen, Nachfassen, Fristen, Rechnungen, CSV, PDF/OCR (40 Prüfungen)
+.build/release/MailPilot --selftest-live --claude --compose --attach   # echte Anbindungen (Claude-Aufrufe, Mail-Fenster unsichtbar, Anhänge)
+.build/release/MailPilot --selftest-live --export  # legt Erinnerung und Termin an und löscht sie sofort wieder
 ```
 
 Selbsttest der Mail- und Claude-Anbindung:

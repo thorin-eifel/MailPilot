@@ -116,3 +116,15 @@ extension Store {
         try db.exec("UPDATE suggestions SET status = ? WHERE id = ?", [status, id])
     }
 }
+
+/// Bereits in Erinnerungen/Kalender übernommene Fristen (verhindert Doppeleinträge).
+extension Store {
+    func hasExport(_ threadKey: String, due: String, kind: String) -> Bool {
+        ((try? db.query("SELECT 1 AS x FROM exports WHERE thread_key = ? AND due_date = ? AND kind = ?", [threadKey, due, kind])) ?? []).isEmpty == false
+    }
+
+    func addExport(_ threadKey: String, due: String, kind: String, extId: String?) throws {
+        try db.exec("INSERT OR IGNORE INTO exports (thread_key, due_date, kind, ext_id, ts) VALUES (?, ?, ?, ?, ?)",
+                    [threadKey, due, kind, extId, Date()])
+    }
+}

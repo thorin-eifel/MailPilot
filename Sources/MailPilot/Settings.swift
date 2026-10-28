@@ -23,6 +23,35 @@ struct CategoryRule: Codable, Identifiable, Hashable {
     ]
 }
 
+/// Wohin Fristen aus Gesprächen automatisch übernommen werden.
+enum DeadlineTarget: String, Codable, CaseIterable, Identifiable {
+    case off, reminders, calendar, both
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .off: "Aus"
+        case .reminders: "Erinnerungen"
+        case .calendar: "Kalender"
+        case .both: "Erinnerungen und Kalender"
+        }
+    }
+
+    var kinds: [DeadlineKind] {
+        switch self {
+        case .off: []
+        case .reminders: [.reminder]
+        case .calendar: [.calendar]
+        case .both: [.reminder, .calendar]
+        }
+    }
+}
+
+enum DeadlineKind: String {
+    case reminder, calendar
+}
+
 struct AppSettings: Codable, Equatable {
     var pollMinutes = 5
     var lookbackDays = 3
@@ -53,6 +82,16 @@ struct AppSettings: Codable, Equatable {
     var vipNotify = true
     /// Korrekturen in Mail oder im Dashboard erkennen und daraus Regeln vorschlagen.
     var learnFromCorrections = true
+    /// Bei überfälligen Gesprächen („wartet auf Antwort“) automatisch einen Nachfass-Entwurf vorbereiten.
+    var autoFollowUpDrafts = true
+    /// Fristen automatisch in Erinnerungen und/oder Kalender eintragen.
+    var deadlineTarget: DeadlineTarget = .off
+    var reminderList = "MailPilot"
+    var calendarID = ""
+    var calendarName = ""
+    /// Rechnungen aus Mails der Kategorie `invoiceCategory` samt PDF-Anhang auslesen.
+    var extractInvoices = true
+    var invoiceCategory = "Rechnungen"
 
     func isEnabled(_ account: String) -> Bool {
         enabledAccounts.map { $0.contains(account) } ?? true
@@ -133,5 +172,12 @@ extension AppSettings {
         vipFlagColor = v(.vipFlagColor, vipFlagColor)
         vipNotify = v(.vipNotify, vipNotify)
         learnFromCorrections = v(.learnFromCorrections, learnFromCorrections)
+        autoFollowUpDrafts = v(.autoFollowUpDrafts, autoFollowUpDrafts)
+        deadlineTarget = v(.deadlineTarget, deadlineTarget)
+        reminderList = v(.reminderList, reminderList)
+        calendarID = v(.calendarID, calendarID)
+        calendarName = v(.calendarName, calendarName)
+        extractInvoices = v(.extractInvoices, extractInvoices)
+        invoiceCategory = v(.invoiceCategory, invoiceCategory)
     }
 }

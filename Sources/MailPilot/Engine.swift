@@ -30,6 +30,13 @@ final class Engine: ObservableObject {
     @Published private(set) var activity: [ActivityEntry] = []
     /// Je Konto: "ok" (Zielordner zurücklesbar) oder "blocked" (nur markieren). Fehlt = noch ungeprüft.
     @Published var moveStatus: [String: String] = [:]
+    /// Verfügbare Erinnerungslisten und Kalender (für die Auswahl der Fristen-Ziele).
+    @Published var reminderLists: [String] = []
+    @Published var calendars: [CalendarInfo] = []
+    @Published private(set) var invoices: [Invoice] = []
+    /// Noch nicht ausgelesene Mails der Rechnungs-Kategorie.
+    @Published private(set) var invoiceQueue = 0
+    @Published var invoiceBusy = false
     @Published private(set) var suggestions: [RuleSuggestion] = []
     @Published private(set) var corrections: [Correction] = []
     @Published private(set) var briefing: Briefing?
@@ -46,7 +53,7 @@ final class Engine: ObservableObject {
     /// Für die Bildvorschau aus: Beispieldaten dürfen die echte settings.json nicht überschreiben.
     var persistSettings = true
     private var loop: Task<Void, Never>?
-    private var myAddresses: [String]
+    var myAddresses: [String]
     /// Abbruchgrund innerhalb paralleler Analysen (z. B. Claude nicht angemeldet oder Limit erreicht).
     private var abortError: Error?
 
@@ -108,9 +115,11 @@ final class Engine: ObservableObject {
         }
     }
 
-    var needsReply: [MailThread] { threads.filter { $0.status == .needsReply } }
-    var waiting: [MailThread] { threads.filter { $0.status == .waiting } }
+    /// Zurückgestellte Gespräche erscheinen weder in den Listen noch in den Zählern, bis die Zeit abgelaufen ist.
+    var needsReply: [MailThread] { threads.filter { $0.status == .needsReply && !$0.isSnoozed } }
+    var waiting: [MailThread] { threads.filter { $0.status == .waiting && !$0.isSnoozed } }
     var overdue: [MailThread] { waiting.filter { $0.isOverdue(followUpDays: settings.followUpDays) } }
+    var snoozed: [MailThread] { threads.filter(\.isSnoozed).sorted { ($0.snoozedUntil ?? .distantFuture) < ($1.snoozedUntil ?? .distantFuture) } }
 
     func messages(in thread: MailThread) -> [StoredMessage] {
         (try? store.messages(inThread: thread.threadKey)) ?? []
@@ -120,6 +129,8 @@ final class Engine: ObservableObject {
         threads = (try? store.threads(accounts: enabledAccountNames)) ?? []
         activity = (try? store.activity()) ?? []
         suggestions = (try? store.openSuggestions()) ?? []
+        invoices = (try? store.invoices(accounts: enabledAccountNames)) ?? []
+        invoiceQueue = settings.extractInvoices ? store.invoiceQueueCount(category: settings.invoiceCategory, accounts: enabledAccountNames) : 0
         moveStatus = Dictionary(uniqueKeysWithValues: accounts.compactMap { a in
             store.value("moveCheck.\(a.name)").map { (a.name, $0) }
         })
@@ -147,6 +158,28 @@ final class Engine: ObservableObject {
             RuleSuggestion(id: 1, kind: "sender", value: "news@shop.example", category: "Rechnungen", keepInInbox: false, count: 2),
             RuleSuggestion(id: 2, kind: "domain", value: "lieferant.example", category: "Bestellungen", keepInInbox: false, count: 4),
         ]
+        invoices = [
+            Invoice(messageId: "p1", threadKey: nil, account: "iCloud", sender: "Muster IT <buchhaltung@muster-it.example>", senderEmail: "buchhaltung@muster-it.example",
+                    subject: "Rechnung RE-2026-0815", mailDate: Date().addingTimeInterval(-5 * 86400), vendor: "Muster IT GmbH", number: "RE-2026-0815",
+                    amount: 1235, vat: 197.18, currency: "EUR", issueDate: Deadlines.format(Date().addingTimeInterval(-5 * 86400)),
+                    dueDate: Deadlines.format(Date().addingTimeInterval(-2 * 86400)), description: "Wartung Oktober 2026", source: "pdf", fileName: "re.pdf",
+                    paid: false, status: "ok", error: nil),
+            Invoice(messageId: "p2", threadKey: nil, account: "iCloud", sender: "Telekom <rechnung@telekom.example>", senderEmail: "rechnung@telekom.example",
+                    subject: "Ihre Rechnung", mailDate: Date().addingTimeInterval(-3 * 86400), vendor: "Telekom Deutschland GmbH", number: "7788-2210",
+                    amount: 64.95, vat: 10.37, currency: "EUR", issueDate: Deadlines.format(Date().addingTimeInterval(-3 * 86400)),
+                    dueDate: Deadlines.format(Date().addingTimeInterval(4 * 86400)), description: "Mobilfunk Oktober", source: "pdf", fileName: "t.pdf",
+                    paid: false, status: "ok", error: nil),
+            Invoice(messageId: "p3", threadKey: nil, account: "iCloud", sender: "Hetzner <billing@hetzner.example>", senderEmail: "billing@hetzner.example",
+                    subject: "Invoice", mailDate: Date().addingTimeInterval(-9 * 86400), vendor: "Hetzner Online GmbH", number: "H-4411",
+                    amount: 31.5, vat: nil, currency: "EUR", issueDate: Deadlines.format(Date().addingTimeInterval(-9 * 86400)),
+                    dueDate: Deadlines.format(Date().addingTimeInterval(12 * 86400)), description: "Cloud-Server", source: "mail", fileName: nil,
+                    paid: false, status: "ok", error: nil),
+            Invoice(messageId: "p4", threadKey: nil, account: "iCloud", sender: "Shop <a@shop.example>", senderEmail: "a@shop.example",
+                    subject: "Bestellung", mailDate: Date().addingTimeInterval(-12 * 86400), vendor: "Beispiel-Shop", number: nil,
+                    amount: 89, vat: 14.21, currency: "EUR", issueDate: nil, dueDate: nil, description: "Bestellung 123", source: "mail", fileName: nil,
+                    paid: true, status: "ok", error: nil),
+        ]
+        invoiceQueue = 7
         corrections = [
             Correction(id: 1, date: Date().addingTimeInterval(-1800), messageId: "a", subject: "Ihre Rechnung Oktober", senderEmail: "news@shop.example",
                        fromCategory: "Newsletter", toCategory: "Rechnungen", toInbox: false, source: "mail"),
@@ -284,6 +317,7 @@ final class Engine: ObservableObject {
         defer { isRunning = false; lastRun = Date(); reload() }
 
         do {
+            await wakeSnoozedThreads()
             status = "Lese Apple Mail …"
             let since = Date().addingTimeInterval(-Double(settings.lookbackDays) * 86400)
             let known = try store.knownMessageIds(since: since.addingTimeInterval(-86400))
@@ -295,6 +329,9 @@ final class Engine: ObservableObject {
             status = "Prüfe Korrekturen …"
             await syncCorrections()
             checkFollowUps()
+            await generateFollowUps()
+            await syncDeadlines()
+            await extractInvoices(limit: 6)
             try await briefingIfDue(claude: claude)
             status = result.remaining > 0 ? "\(result.remaining) weitere Mails im nächsten Durchlauf" : "Aktuell"
         } catch {
@@ -429,9 +466,16 @@ final class Engine: ObservableObject {
             if m.isFromMe {
                 t.draft = nil
                 t.draftFor = nil
-            } else if let draft = a.reply_draft, !draft.isEmpty, a.needs_reply, settings.autoDrafts {
-                t.draft = draft
-                t.draftFor = m.messageId
+                t.draftKind = nil
+            } else {
+                // Eine neue Nachricht holt zurückgestellte Gespräche zurück und macht Nachfass-Entwürfe hinfällig.
+                t.snoozedUntil = nil
+                if t.draftKind == "followup" { t.draft = nil; t.draftFor = nil; t.draftKind = nil }
+                if let draft = a.reply_draft, !draft.isEmpty, a.needs_reply, settings.autoDrafts {
+                    t.draft = draft
+                    t.draftFor = m.messageId
+                    t.draftKind = "reply"
+                }
             }
         }
         if let due = a.due_date, !due.isEmpty { t.dueDate = due }
@@ -607,6 +651,10 @@ final class Engine: ObservableObject {
 
     /// Öffnet in Mail ein Antwortfenster mit dem Entwurf. Gesendet wird ausschließlich vom Nutzer.
     func openReply(for thread: MailThread, text: String) async {
+        if thread.draftKind == "followup" || thread.isFollowUpCase {
+            await openFollowUp(for: thread, text: text)
+            return
+        }
         let msgs = messages(in: thread)
         guard let target = msgs.last(where: { $0.messageId == thread.draftFor }) ?? msgs.last(where: { !$0.isFromMe }) else {
             lastError = "Keine eingegangene Nachricht in diesem Gespräch gefunden."
@@ -623,10 +671,18 @@ final class Engine: ObservableObject {
     func redraft(_ thread: MailThread, hint: String) async -> String? {
         guard let claude else { lastError = ClaudeError.notFound.localizedDescription; return nil }
         do {
-            let text = try await claude.redraft(thread: thread, messages: messages(in: thread), hint: hint, settings: settings)
+            let msgs = messages(in: thread)
+            let followUp = thread.isFollowUpCase
+            let text = try await claude.redraft(thread: thread, messages: msgs, hint: hint, settings: settings, followUp: followUp)
             var t = thread
             t.draft = text
-            if t.draftFor == nil { t.draftFor = messages(in: thread).last(where: { !$0.isFromMe })?.messageId }
+            if followUp {
+                t.draftKind = "followup"
+                t.draftFor = msgs.last(where: { $0.isFromMe })?.messageId
+            } else {
+                t.draftKind = "reply"
+                if t.draftFor == nil { t.draftFor = msgs.last(where: { !$0.isFromMe })?.messageId }
+            }
             try store.upsert(t)
             reload()
             return text
@@ -671,7 +727,8 @@ final class Engine: ObservableObject {
         defer { isBriefing = false }
         let open = threads.filter { $0.status == .needsReply || $0.status == .waiting || $0.dueDate != nil && $0.status != .done }
         let newCount = store.countMessages(since: Date().addingTimeInterval(-86400))
-        let text = try await claude.briefing(threads: Array(open.prefix(60)), newCount: newCount, settings: settings)
+        let text = try await claude.briefing(threads: Array(open.prefix(60)), newCount: newCount, settings: settings,
+                                          invoices: invoices.filter { $0.isOverdue() || $0.isDue(within: 14) })
         try store.saveBriefing(text)
         reload()
     }

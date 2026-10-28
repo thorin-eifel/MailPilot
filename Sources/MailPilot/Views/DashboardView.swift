@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
-    case briefing, needsReply, waiting, all, rules, activity, settings
+    case briefing, needsReply, waiting, snoozed, all, invoices, rules, activity, settings
 
     var id: String { rawValue }
 
@@ -10,7 +10,9 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .briefing: "Briefing"
         case .needsReply: "Antwort nötig"
         case .waiting: "Warte auf Antwort"
+        case .snoozed: "Zurückgestellt"
         case .all: "Alle Gespräche"
+        case .invoices: "Rechnungen"
         case .rules: "Regeln & VIP"
         case .activity: "Aktivität"
         case .settings: "Einstellungen"
@@ -22,7 +24,9 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .briefing: "sun.horizon.fill"
         case .needsReply: "arrowshape.turn.up.left.fill"
         case .waiting: "hourglass"
+        case .snoozed: "moon.zzz.fill"
         case .all: "bubble.left.and.bubble.right.fill"
+        case .invoices: "eurosign.circle.fill"
         case .rules: "slider.horizontal.3"
         case .activity: "list.bullet.rectangle.fill"
         case .settings: "gearshape.fill"
@@ -48,9 +52,15 @@ struct DashboardView: View {
                 Section {
                     row(.needsReply, count: engine.needsReply.count)
                     row(.waiting, count: engine.waiting.count)
+                    row(.snoozed, count: engine.snoozed.count)
                     row(.all, count: nil)
                 } header: {
                     Eyebrow(text: "Gespräche")
+                }
+                Section {
+                    row(.invoices, count: engine.invoiceAlertCount)
+                } header: {
+                    Eyebrow(text: "Belege")
                 }
                 Section {
                     row(.rules, count: engine.suggestions.count)
@@ -78,7 +88,9 @@ struct DashboardView: View {
                 case .briefing: BriefingView()
                 case .needsReply: ThreadsView(filter: .needsReply)
                 case .waiting: ThreadsView(filter: .waiting)
+                case .snoozed: ThreadsView(filter: nil, snoozedOnly: true)
                 case .all: ThreadsView(filter: nil)
+                case .invoices: InvoicesView()
                 case .rules: RulesView()
                 case .activity: ActivityView()
                 case .settings: SettingsView()

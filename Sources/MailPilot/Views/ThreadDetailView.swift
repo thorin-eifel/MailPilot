@@ -8,6 +8,8 @@ struct ThreadDetailView: View {
     @ViewState private var working = false
     @ViewState private var messages: [StoredMessage] = []
     @ViewState private var ruleDraft: UserRule?
+    @ViewState private var showSnoozePicker = false
+    @ViewState private var showDuePicker = false
 
     private var sender: StoredMessage? { messages.last(where: { !$0.isFromMe }) }
     private var senderIsVIP: Bool { sender.map { engine.isVIP($0.senderEmail) } ?? false }
@@ -28,15 +30,45 @@ struct ThreadDetailView: View {
                             .foregroundStyle(CTW.accent)
                             .fontWeight(.medium)
                     }
-                    if let due = thread.dueDate {
-                        Label("Frist: \(due)", systemImage: "calendar").foregroundStyle(CTW.accent)
+                    HStack(spacing: 8) {
+                        if let due = thread.dueDate {
+                            Label("Frist: \(Deadlines.parse(due).map { $0.formatted(date: .complete, time: .omitted) } ?? due)",
+                                  systemImage: "calendar")
+                                .foregroundStyle(CTW.accent)
+                        } else {
+                            Label("Keine Frist", systemImage: "calendar").foregroundStyle(CTW.muted)
+                        }
+                        Menu {
+                            if thread.dueDate != nil {
+                                Button { Task { await engine.exportDeadline(thread, kind: .reminder) } } label: {
+                                    Label("In Erinnerungen eintragen", systemImage: "checklist")
+                                }
+                                Button { Task { await engine.exportDeadline(thread, kind: .calendar) } } label: {
+                                    Label("In Kalender eintragen", systemImage: "calendar.badge.plus")
+                                }
+                                Divider()
+                            }
+                            Button { showDuePicker = true } label: {
+                                Label(thread.dueDate == nil ? "Frist setzen …" : "Frist ändern …", systemImage: "calendar.badge.clock")
+                            }
+                            if thread.dueDate != nil {
+                                Button(role: .destructive) { engine.setDueDate(thread, to: nil) } label: {
+                                    Label("Frist entfernen", systemImage: "xmark.circle")
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("Frist in Erinnerungen oder Kalender eintragen, ändern oder entfernen")
                     }
                 }
                 .ctwCard()
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Eyebrow(text: "Antwortentwurf", number: "02")
+                        Eyebrow(text: thread.isFollowUpCase ? "Nachfass-Entwurf" : "Antwortentwurf", number: "02")
                         Spacer()
                         if working { ProgressView().controlSize(.small) }
                     }
@@ -54,7 +86,8 @@ struct ThreadDetailView: View {
                             .textFieldStyle(.roundedBorder)
                             .onSubmit(redraft)
                         Button(action: redraft) {
-                            Label(draft.isEmpty ? "Entwurf erstellen" : "Neu schreiben", systemImage: "wand.and.stars")
+                            Label(draft.isEmpty ? (thread.isFollowUpCase ? "Nachfass-Entwurf erstellen" : "Entwurf erstellen") : "Neu schreiben",
+                                  systemImage: "wand.and.stars")
                         }
                         .buttonStyle(.ctwSecondary)
                         .disabled(working)
@@ -98,6 +131,12 @@ struct ThreadDetailView: View {
             messages = engine.messages(in: thread)
         }
         .sheet(item: $ruleDraft) { RuleEditorSheet(rule: $0).environmentObject(engine) }
+        .sheet(isPresented: $showDuePicker) {
+            DueDatePickerSheet(initial: Deadlines.parse(thread.dueDate)) { engine.setDueDate(thread, to: $0) }
+        }
+        .sheet(isPresented: $showSnoozePicker) {
+            SnoozePickerSheet { date in engine.snooze(thread, until: date) }
+        }
     }
 
     private var header: some View {
@@ -119,6 +158,25 @@ struct ThreadDetailView: View {
                 Label(thread.counterpart, systemImage: "person.crop.circle").foregroundStyle(CTW.muted)
                 Label("\(thread.messageCount)", systemImage: "envelope").foregroundStyle(CTW.muted)
                 Spacer()
+                Menu {
+                    ForEach(SnoozeOption.allCases) { o in
+                        if let date = o.date(from: Date()) {
+                            Button { engine.snooze(thread, until: date) } label: {
+                                Label("\(o.label) · \(date.formatted(date: .abbreviated, time: .shortened))", systemImage: o.symbol)
+                            }
+                        }
+                    }
+                    Button { showSnoozePicker = true } label: { Label("Datum und Uhrzeit …", systemImage: "calendar.badge.plus") }
+                    if thread.isSnoozed {
+                        Divider()
+                        Button { engine.snooze(thread, until: nil) } label: { Label("Zurückstellung aufheben", systemImage: "bell.fill") }
+                    }
+                } label: {
+                    Label(thread.isSnoozed ? "Zurückgestellt" : "Zurückstellen", systemImage: "moon.zzz.fill")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Gespräch ausblenden und zu einem späteren Zeitpunkt wieder zeigen")
                 Menu {
                     ForEach(engine.settings.categories) { c in
                         Button { Task { await engine.changeCategory(of: thread, to: c.name) } } label: {
@@ -233,5 +291,74 @@ struct MessageRow: View {
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Eigenes Datum und eigene Uhrzeit für „Zurückstellen“.
+struct SnoozePickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ViewState private var date: Date
+    let onPick: (Date) -> Void
+
+    init(onPick: @escaping (Date) -> Void) {
+        self.onPick = onPick
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+        _date = ViewState(initialValue: Calendar.current.date(bySettingHour: 8, minute: 0, second: 0, of: tomorrow) ?? tomorrow)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Eyebrow(text: "Zurückstellen bis")
+            DatePicker("", selection: $date, in: Date()..., displayedComponents: [.date, .hourAndMinute])
+                .datePickerStyle(.graphical)
+                .labelsHidden()
+            HStack {
+                Spacer()
+                Button("Abbrechen") { dismiss() }.buttonStyle(.ctwSecondary).keyboardShortcut(.cancelAction)
+                Button {
+                    onPick(date)
+                    dismiss()
+                } label: { Label("Zurückstellen", systemImage: "moon.zzz.fill") }
+                    .buttonStyle(.ctwPrimary)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
+        .background(CTW.surface)
+    }
+}
+
+/// Frist (nur Datum) setzen oder ändern.
+struct DueDatePickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ViewState private var date: Date
+    let onPick: (Date) -> Void
+
+    init(initial: Date?, onPick: @escaping (Date) -> Void) {
+        self.onPick = onPick
+        _date = ViewState(initialValue: initial ?? Calendar.current.date(byAdding: .day, value: 7, to: Date()) ?? Date())
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Eyebrow(text: "Frist")
+            DatePicker("", selection: $date, displayedComponents: [.date])
+                .datePickerStyle(.graphical)
+                .labelsHidden()
+            HStack {
+                Spacer()
+                Button("Abbrechen") { dismiss() }.buttonStyle(.ctwSecondary).keyboardShortcut(.cancelAction)
+                Button {
+                    onPick(date)
+                    dismiss()
+                } label: { Label("Übernehmen", systemImage: "checkmark") }
+                    .buttonStyle(.ctwPrimary)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
+        .background(CTW.surface)
     }
 }

@@ -27,6 +27,7 @@ final class MailBridge: @unchecked Sendable {
     private let batchScript: URL
     private let accountsScript: URL
     private let syncScript: URL
+    private let composeScript: URL
 
     init() {
         fetchScript = Paths.scripts.appendingPathComponent("fetch.js")
@@ -39,6 +40,8 @@ final class MailBridge: @unchecked Sendable {
         try? Self.accountsJS.write(to: accountsScript, atomically: true, encoding: .utf8)
         syncScript = Paths.scripts.appendingPathComponent("sync.js")
         try? Self.syncJS.write(to: syncScript, atomically: true, encoding: .utf8)
+        composeScript = Paths.scripts.appendingPathComponent("compose.js")
+        try? Self.composeJS.write(to: composeScript, atomically: true, encoding: .utf8)
     }
 
     func listAccounts() async throws -> [MailAccountInfo] {
@@ -104,6 +107,22 @@ final class MailBridge: @unchecked Sendable {
     /// Spezielles Verschiebeziel: der Posteingang des jeweiligen Kontos.
     static let inboxToken = "\u{1}INBOX"
 
+    struct ComposeResult: Decodable {
+        var subject: String
+        var to: [String]
+        var discarded: Bool
+    }
+
+    /// Öffnet ein neues Nachrichtenfenster mit Empfängern, Betreff und Text. Gesendet wird nichts.
+    /// `visible: false` legt die Nachricht nur unsichtbar an und verwirft sie wieder (Tests).
+    @discardableResult
+    func compose(sender: String?, to: [String], subject: String, content: String, visible: Bool = true) async throws -> ComposeResult {
+        var params: [String: Any] = ["to": to, "subject": subject, "content": content, "visible": visible]
+        if let sender { params["sender"] = sender }
+        let out = try await run(composeScript, params)
+        return try JSONDecoder().decode(ComposeResult.self, from: Data(out.utf8))
+    }
+
     struct FolderRef: Hashable {
         var account: String
         var path: String
@@ -157,7 +176,7 @@ final class MailBridge: @unchecked Sendable {
         return (try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any]) ?? [:]
     }
 
-    private func run(_ script: URL, _ params: [String: Any]) async throws -> String {
+    func run(_ script: URL, _ params: [String: Any]) async throws -> String {
         // Parameter über eine Datei übergeben – die Liste bekannter IDs sprengt sonst die Argumentlänge.
         let paramFile = FileManager.default.temporaryDirectory.appendingPathComponent("mailpilot-\(UUID().uuidString).json")
         try JSONSerialization.data(withJSONObject: params).write(to: paramFile)
@@ -256,6 +275,26 @@ final class MailBridge: @unchecked Sendable {
           if (!wanted[accountOf(mb)]) continue;
           collect(mb.messages.whose({ dateSent: { _greaterThan: sentSince } }), true);
         }
+      }
+      return JSON.stringify(out);
+    }
+    """#
+
+    private static let composeJS = #"""
+    function run(argv) {
+      ObjC.import('Foundation');
+      const p = JSON.parse($.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null).js);
+      const Mail = Application('Mail');
+      const msg = Mail.OutgoingMessage({ subject: p.subject, content: p.content, visible: p.visible });
+      Mail.outgoingMessages.push(msg);
+      if (p.sender) { try { msg.sender = p.sender; } catch (e) {} }
+      for (const a of p.to) { msg.toRecipients.push(Mail.ToRecipient({ address: a })); }
+      const out = { subject: msg.subject(), to: msg.toRecipients.address(), discarded: false };
+      if (p.visible) {
+        Mail.activate();
+      } else {
+        // Nur für Tests: unsichtbar angelegt und wieder verworfen, nichts wird gespeichert oder gesendet.
+        try { Mail.delete(msg); out.discarded = true; } catch (e) {}
       }
       return JSON.stringify(out);
     }

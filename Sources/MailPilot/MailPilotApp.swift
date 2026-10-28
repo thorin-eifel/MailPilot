@@ -3,7 +3,11 @@ import SwiftUI
 @main
 enum EntryPoint {
     static func main() {
-        if CommandLine.arguments.contains("--selftest-rules") {
+        if CommandLine.arguments.contains("--selftest-features") {
+            FeatureSelfTest.run()
+        } else if CommandLine.arguments.contains("--selftest-live") {
+            FeatureSelfTest.runLive(CommandLine.arguments)
+        } else if CommandLine.arguments.contains("--selftest-rules") {
             RulesSelfTest.run()
         } else if CommandLine.arguments.contains("--selftest-sync") {
             RulesSelfTest.runSync()
@@ -140,6 +144,8 @@ enum RenderPreview {
                 render(DashboardView(initial: .all), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("dashboard-\(suffix).png"))
                 render(DashboardView(initial: .briefing), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("briefing-\(suffix).png"))
                 render(DashboardView(initial: .rules), size: NSSize(width: 1240, height: 1500), dark: dark, to: out.appendingPathComponent("rules-\(suffix).png"))
+                render(DashboardView(initial: .invoices), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("invoices-\(suffix).png"))
+                render(DashboardView(initial: .snoozed), size: NSSize(width: 1240, height: 560), dark: dark, to: out.appendingPathComponent("snoozed-\(suffix).png"))
                 render(DashboardView(initial: .settings), size: NSSize(width: 1240, height: 900), dark: dark, to: out.appendingPathComponent("settings-\(suffix).png"))
                 if let thread {
                     render(ThreadDetailView(thread: thread), size: NSSize(width: 760, height: 900), dark: dark, to: out.appendingPathComponent("thread-\(suffix).png"))

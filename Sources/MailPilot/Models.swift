@@ -133,8 +133,17 @@ struct MailThread: Identifiable, Hashable {
     var draft: String?
     var draftFor: String?
     var followupNotified: Bool
+    /// Art des Entwurfs: "reply" (Antwort) oder "followup" (Nachfassen).
+    var draftKind: String?
+    /// Bis dahin aus allen Listen ausgeblendet („Montag wieder zeigen“).
+    var snoozedUntil: Date?
 
     var id: String { threadKey }
+
+    var isSnoozed: Bool { snoozedUntil.map { $0 > Date() } ?? false }
+
+    /// Ich habe zuletzt geschrieben und warte auf Antwort – hier passt eine Nachfrage statt einer Antwort.
+    var isFollowUpCase: Bool { status == .waiting && lastFromMe }
 
     func isOverdue(followUpDays: Int) -> Bool {
         status == .waiting && lastDate < Date().addingTimeInterval(-Double(followUpDays) * 86400)

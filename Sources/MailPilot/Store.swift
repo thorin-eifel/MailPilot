@@ -6,6 +6,7 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 struct Row {
     fileprivate var values: [String: Any]
 
+    func hasKey(_ k: String) -> Bool { values[k] != nil }
     func string(_ k: String) -> String? { values[k] as? String }
     func int(_ k: String) -> Int { Int(values[k] as? Int64 ?? 0) }
     func int64(_ k: String) -> Int64 { values[k] as? Int64 ?? 0 }
@@ -116,12 +117,25 @@ final class Store: @unchecked Sendable {
         """)
         try db.exec("CREATE TABLE IF NOT EXISTS briefings (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, text TEXT)")
         try db.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+        try? db.exec("ALTER TABLE threads ADD COLUMN snoozed_until REAL")
+        try? db.exec("ALTER TABLE threads ADD COLUMN draft_kind TEXT")
         try? db.exec("ALTER TABLE messages ADD COLUMN decided_by TEXT")
         try? db.exec("ALTER TABLE messages ADD COLUMN moved_at REAL")
         try db.exec("""
         CREATE TABLE IF NOT EXISTS corrections (
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, message_id TEXT, subject TEXT, account TEXT,
             sender_email TEXT, domain TEXT, from_category TEXT, to_category TEXT, to_inbox INTEGER DEFAULT 0, source TEXT)
+        """)
+        try db.exec("""
+        CREATE TABLE IF NOT EXISTS exports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, thread_key TEXT, due_date TEXT, kind TEXT, ext_id TEXT, ts REAL,
+            UNIQUE(thread_key, due_date, kind))
+        """)
+        try db.exec("""
+        CREATE TABLE IF NOT EXISTS invoices (
+            message_id TEXT PRIMARY KEY, thread_key TEXT, account TEXT, sender TEXT, sender_email TEXT, subject TEXT, mail_date REAL,
+            vendor TEXT, number TEXT, amount REAL, vat REAL, currency TEXT, issue_date TEXT, due_date TEXT, description TEXT,
+            source TEXT, file_name TEXT, paid INTEGER DEFAULT 0, status TEXT, error TEXT, ts REAL)
         """)
         try db.exec("""
         CREATE TABLE IF NOT EXISTS suggestions (
@@ -285,11 +299,12 @@ final class Store: @unchecked Sendable {
     func upsert(_ t: MailThread) throws {
         try db.exec("""
         INSERT OR REPLACE INTO threads (thread_key, subject, norm_subject, counterpart, last_date, last_from_me,
-            message_count, status, summary, next_step, due_date, priority, category, draft, draft_for, followup_notified)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            message_count, status, summary, next_step, due_date, priority, category, draft, draft_for, followup_notified,
+            draft_kind, snoozed_until)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [t.threadKey, t.subject, t.normSubject, t.counterpart, t.lastDate, t.lastFromMe, t.messageCount,
               t.status.rawValue, t.summary, t.nextStep, t.dueDate, t.priority.rawValue, t.category,
-              t.draft, t.draftFor, t.followupNotified])
+              t.draft, t.draftFor, t.followupNotified, t.draftKind, t.snoozedUntil])
     }
 
     private func thread(_ r: Row) -> MailThread {
@@ -309,7 +324,9 @@ final class Store: @unchecked Sendable {
             category: r.string("category"),
             draft: r.string("draft"),
             draftFor: r.string("draft_for"),
-            followupNotified: r.bool("followup_notified")
+            followupNotified: r.bool("followup_notified"),
+            draftKind: r.string("draft_kind"),
+            snoozedUntil: r.double("snoozed_until") > 0 ? r.date("snoozed_until") : nil
         )
     }
 

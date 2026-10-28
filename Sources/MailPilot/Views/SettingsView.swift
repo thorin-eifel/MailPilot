@@ -15,6 +15,13 @@ struct SettingsView: View {
                 Toggle("Mails automatisch in Ordner verschieben", isOn: $engine.settings.autoMove)
                 Toggle("Mails automatisch markieren (Flagge)", isOn: $engine.settings.autoFlag)
                 Toggle("Antwortentwürfe automatisch vorbereiten", isOn: $engine.settings.autoDrafts)
+                Toggle("Nachfass-Entwürfe bei überfälligen Gesprächen vorbereiten", isOn: $engine.settings.autoFollowUpDrafts)
+                Toggle("Rechnungen aus Mails und PDF-Anhängen auslesen", isOn: $engine.settings.extractInvoices)
+                if engine.settings.extractInvoices {
+                    Picker("Kategorie der Rechnungen", selection: $engine.settings.invoiceCategory) {
+                        ForEach(engine.settings.categories.map(\.name), id: \.self) { Text($0).tag($0) }
+                    }
+                }
                 Toggle("Probelauf – nur protokollieren, nichts in Mail ändern", isOn: $engine.settings.dryRun)
                 Toggle("Gesendete Mails einbeziehen (für „Warte auf Antwort“)", isOn: $engine.settings.includeSent)
                 Toggle("Mitteilungen (wichtige Mails, Follow-ups, Briefing)", isOn: $engine.settings.notifications)
@@ -41,6 +48,8 @@ struct SettingsView: View {
                         }
                     }
             }
+
+            DeadlinesSection()
 
             Section(header: SectionHeader(title: "Claude", symbol: "sparkles")) {
                 Picker("Modell", selection: $engine.settings.model) {
@@ -257,5 +266,58 @@ struct MoveStatusBadge: View {
         case "blocked": "Verschobene Mails lassen sich im Zielordner nicht zurücklesen. In diesem Konto wird nur markiert, nicht verschoben. Nach einer Änderung am Konto oder an den Ordnern „Erneut prüfen“."
         default: "Die erste Verschiebung dient als Probe: Wird die Mail im Zielordner gefunden, wird das Konto freigegeben."
         }
+    }
+}
+
+/// Fristen automatisch in Erinnerungen und/oder Kalender übernehmen.
+struct DeadlinesSection: View {
+    @EnvironmentObject var engine: Engine
+
+    private var listOptions: [String] {
+        var names = engine.reminderLists
+        for extra in [engine.settings.reminderList, "MailPilot"] where !extra.isEmpty && !names.contains(extra) { names.append(extra) }
+        return names
+    }
+
+    /// Kalender können gleich heißen – dann nummerieren.
+    private func label(_ c: CalendarInfo) -> String {
+        let same = engine.calendars.filter { $0.name == c.name }
+        guard same.count > 1, let i = same.firstIndex(of: c) else { return c.name }
+        return "\(c.name) (\(i + 1))"
+    }
+
+    var body: some View {
+        Section {
+            Picker("Fristen übernehmen in", selection: $engine.settings.deadlineTarget) {
+                ForEach(DeadlineTarget.allCases) { Text($0.label).tag($0) }
+            }
+            if engine.settings.deadlineTarget == .reminders || engine.settings.deadlineTarget == .both {
+                Picker("Erinnerungsliste", selection: $engine.settings.reminderList) {
+                    ForEach(listOptions, id: \.self) { Text($0).tag($0) }
+                }
+            }
+            if engine.settings.deadlineTarget == .calendar || engine.settings.deadlineTarget == .both {
+                Picker("Kalender", selection: Binding(
+                    get: { engine.settings.calendarID },
+                    set: { id in
+                        engine.settings.calendarID = id
+                        engine.settings.calendarName = engine.calendars.first { $0.id == id }?.name ?? ""
+                    }
+                )) {
+                    Text("Bitte wählen").tag("")
+                    ForEach(engine.calendars) { Text(label($0)).tag($0.id) }
+                }
+                if engine.settings.calendarID.isEmpty {
+                    Label("Ohne Kalenderauswahl werden keine Termine angelegt.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(CTW.action)
+                }
+            }
+        } header: {
+            SectionHeader(title: "Fristen", symbol: "calendar.badge.clock")
+        } footer: {
+            Text("Hat ein offenes Gespräch eine Frist (von Claude erkannt oder von dir gesetzt), wird sie automatisch als Erinnerung (9 Uhr am Fristtag) bzw. ganztägiger Termin eingetragen – ohne Werbung und Newsletter, jede Frist nur einmal. Beim ersten Zugriff fragt macOS nach der Berechtigung für Erinnerungen bzw. Kalender.")
+                .font(.caption).foregroundStyle(CTW.muted)
+        }
+        .task { await engine.loadExportTargets() }
     }
 }
