@@ -132,6 +132,8 @@ final class Store: @unchecked Sendable {
         try? db.exec("ALTER TABLE messages ADD COLUMN moved_at REAL")
         try? db.exec("ALTER TABLE messages ADD COLUMN attempts INTEGER DEFAULT 0")
         try? db.exec("ALTER TABLE messages ADD COLUMN failed_at REAL")
+        try? db.exec("ALTER TABLE messages ADD COLUMN archive_tried INTEGER DEFAULT 0")
+        try db.exec("CREATE TABLE IF NOT EXISTS invoice_skip (message_id TEXT PRIMARY KEY, ts REAL)")
         try db.exec("""
         CREATE TABLE IF NOT EXISTS corrections (
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, message_id TEXT, subject TEXT, account TEXT,

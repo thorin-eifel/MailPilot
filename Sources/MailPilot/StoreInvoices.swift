@@ -44,11 +44,21 @@ extension Store {
         try db.exec("UPDATE invoices SET paid = ? WHERE message_id = ?", [paid, id])
     }
 
+    /// Vom Nutzer entfernt: Die Mail wird nicht erneut ausgelesen.
+    func skipInvoice(_ id: String) throws {
+        try db.exec("INSERT OR IGNORE INTO invoice_skip (message_id, ts) VALUES (?, ?)", [id, Date()])
+    }
+
+    func unskipInvoice(_ id: String) throws {
+        try db.exec("DELETE FROM invoice_skip WHERE message_id = ?", [id])
+    }
+
     /// Eingegangene Mails der Rechnungs-Kategorie, die noch nicht ausgelesen wurden.
     func invoiceQueue(category: String, accounts: [String], limit: Int) throws -> [StoredMessage] {
         try db.query("""
             SELECT m.* FROM messages m LEFT JOIN invoices i ON i.message_id = m.message_id
             WHERE i.message_id IS NULL AND m.processed = 1 AND m.is_from_me = 0 AND m.is_private = 0 AND m.category = ? AND m.account IN \(inList(accounts))
+            AND m.message_id NOT IN (SELECT message_id FROM invoice_skip)
             ORDER BY m.date DESC LIMIT ?
             """, [category] + accounts + [limit]).map(message)
     }
@@ -57,6 +67,7 @@ extension Store {
         ((try? db.query("""
             SELECT COUNT(*) AS n FROM messages m LEFT JOIN invoices i ON i.message_id = m.message_id
             WHERE i.message_id IS NULL AND m.processed = 1 AND m.is_from_me = 0 AND m.is_private = 0 AND m.category = ? AND m.account IN \(inList(accounts))
+            AND m.message_id NOT IN (SELECT message_id FROM invoice_skip)
             """, [category] + accounts))?.first?.int("n")) ?? 0
     }
 }

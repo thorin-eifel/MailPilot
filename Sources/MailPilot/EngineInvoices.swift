@@ -107,6 +107,7 @@ extension Engine {
         invoiceBusy = true
         defer { invoiceBusy = false; reload() }
         try? store.deleteInvoice(id)
+        try? store.unskipInvoice(id)
         do { saveInvoice(try await buildInvoice(for: m, claude: claude)) } catch { lastError = error.localizedDescription }
     }
 
@@ -124,7 +125,8 @@ extension Engine {
     }
 
     func removeInvoices(_ ids: [String]) {
-        for id in ids { try? store.deleteInvoice(id) }
+        // Entfernte Mails nicht wieder automatisch auslesen.
+        for id in ids { try? store.deleteInvoice(id); try? store.skipInvoice(id) }
         reload()
     }
 }

@@ -22,6 +22,8 @@ final class Engine: ObservableObject {
             if persistSettings { settings.save(to: Paths.settings) }
             UsageMonitor.shared.update(settings.usageGuard)
             if oldValue.pollMinutes != settings.pollMinutes { schedule() }
+            // Probelauf beendet: Was er nur durchgespielt hat, wird beim nächsten Durchlauf wirklich ausgeführt.
+            if oldValue.dryRun, !settings.dryRun, store.releaseDryRun() > 0 { store.setValue("1", for: "catchUp") }
             if oldValue.enabledAccounts != settings.enabledAccounts { accountsChanged() }
         }
     }
@@ -88,6 +90,7 @@ final class Engine: ObservableObject {
         UsageMonitor.shared.configure(store: store)
         UsageMonitor.shared.update(settings.usageGuard)
         UsageMonitor.shared.onChange = { Task { @MainActor in Engine.shared.refreshUsage() } }
+        if store.releaseLegacyDryRun() > 0 { store.setValue("1", for: "catchUp") }
         reload()
     }
 
@@ -395,8 +398,12 @@ final class Engine: ObservableObject {
             let result = try await bridge.fetch(since: since, accounts: enabledAccountNames, known: known, maxNew: settings.maxPerCycle,
                                                 includeSent: settings.includeSent)
             try ingest(result)
-            try await analyzePending(claude: claude)
-            try await applyPendingActions(initial: false)
+            // Auch bei Pause oder Claude-Fehler wird angewendet, was lokal entschieden wurde; der Fehler folgt danach.
+            let catchUp = store.value("catchUp") != nil || queueAgedForArchive() > 0
+            try await CyclePipeline.run(analyze: { try await self.analyzePending(claude: claude) }, apply: {
+                try await self.applyPendingActions(initial: false, catchUp: catchUp)
+                if catchUp { self.store.setValue(nil, for: "catchUp") }
+            })
             status = "Prüfe Korrekturen …"
             await syncCorrections()
             checkFollowUps()
@@ -588,7 +595,8 @@ final class Engine: ObservableObject {
     // MARK: Aktionen in Mail
 
     /// Wendet Ordner und Flaggen auf alle analysierten, noch nicht bearbeiteten Mails an – stapelweise.
-    func applyPendingActions(initial: Bool, retro: Bool = false) async throws {
+    /// `catchUp`: nachgeholte Aktionen (Ende des Probelaufs, Archivierung) – Flaggen nur für aktuelle Mails, wie im Erstscan.
+    func applyPendingActions(initial: Bool, retro: Bool = false, catchUp: Bool = false) async throws {
         let flagCutoff = Date().addingTimeInterval(-detailedDays * 86400)
         let archiveCutoff = Date().addingTimeInterval(-Double(settings.archiveAfterDays) * 86400)
 
@@ -643,7 +651,7 @@ final class Engine: ObservableObject {
                 if settings.autoFlag {
                     if let f = effect.flag {
                         flag = f
-                    } else if !(initial || retro) || m.date >= flagCutoff {
+                    } else if !(initial || retro || catchUp) || m.date >= flagCutoff {
                         flag = m.priority == .high ? .red : rule?.flag
                     }
                 }
@@ -659,7 +667,8 @@ final class Engine: ObservableObject {
                         store.log(m, kind: "move", detail: "Würde nach „\(targetLabel)“ verschieben", from: m.mailbox,
                                   to: target == MailBridge.inboxToken ? nil : target, dryRun: true)
                     }
-                    try store.markActioned(m.messageId)
+                    // Nur durchgespielt: Nach dem Probelauf werden diese Mails noch einsortiert.
+                    try store.markDryRun(m.messageId)
                     continue
                 }
                 items.append(.init(messageId: m.messageId,
@@ -669,7 +678,7 @@ final class Engine: ObservableObject {
             }
 
             guard !items.isEmpty else { continue }
-            if initial || retro { status = "\(retro ? "Regeln anwenden" : "Erstscan"): sortiere \(items.count) Mails ein …" }
+            if initial || retro || catchUp { status = "\(retro ? "Regeln anwenden" : (catchUp ? "Nachholen" : "Erstscan")): sortiere \(items.count) Mails ein …" }
             let results = try await bridge.batch(items)
             var moveStats: [String: (moved: Int, lost: Int)] = [:]
             for (item, r) in zip(items, results) {

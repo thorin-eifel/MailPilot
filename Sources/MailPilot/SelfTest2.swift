@@ -32,6 +32,7 @@ enum SelfTest2 {
             try prefilterTests(tmp)
             try latestTests(tmp)
             try retryTests(tmp)
+            try catchUpTests(tmp)
         } catch {
             check(false, "Tests liefen ohne Fehler: \(error)")
         }
@@ -504,6 +505,99 @@ enum SelfTest2 {
         store.reviveGivenUpMessages()
         let revived = try store.db.query("SELECT processed FROM messages WHERE message_id = 'r1'").first?.int("processed")
         check(revived == 0, "Wiederholung: aufgegebene Mails werden einmalig freigegeben")
+    }
+
+    // MARK: Probelauf, Pause, Rechnungen entfernen, Archivierung
+
+    final class Flag: @unchecked Sendable { var analyzed = false, applied = false, thrown: Error? }
+
+    static func catchUpTests(_ tmp: URL) throws {
+        let store = try Store(path: tmp.appendingPathComponent("catchup.sqlite"))
+        func analyzed(_ id: String, category: String = "Info", daysAgo: Double = 0) throws {
+            try store.insert(raw(id, date: Date().addingTimeInterval(-daysAgo * 86400)), myAddresses: [])
+            try store.saveAnalysis(of: id, threadKey: id, category: category, priority: .normal, summary: nil)
+        }
+
+        // Probelauf: durchgespielte Mails werden nach dem Ausschalten nachgeholt
+        try analyzed("d1")
+        func pending(_ id: String) throws -> Bool { try store.pendingActions(limit: 50, accounts: ["iCloud"]).contains { $0.messageId == id } }
+        let before = try pending("d1")
+        try store.markDryRun("d1")
+        let during = try pending("d1")
+        check(before && !during, "Probelauf: durchgespielte Mails sind nicht mehr offen (kein Dauerlauf)")
+        let released = store.releaseDryRun()
+        let after = try pending("d1")
+        check(released == 1 && after && store.releaseDryRun() == 0, "Probelauf: nach dem Ausschalten werden sie nachgeholt")
+
+        // Frühere Versionen: im Probelauf als erledigt markiert, aber nichts geschehen
+        try analyzed("d2"); try analyzed("d3")
+        try store.markActioned("d2"); try store.markActioned("d3")
+        let m2 = try store.message(id: "d2")!, m3 = try store.message(id: "d3")!
+        store.log(m2, kind: "flag", detail: "Würde Rot markieren", dryRun: true)
+        store.log(m3, kind: "flag", detail: "Würde Rot markieren", dryRun: true)
+        store.log(m3, kind: "flag", detail: "Rot markiert", dryRun: false)
+        check(store.releaseLegacyDryRun() == 1, "Probelauf: alte Probelauf-Mails werden einmalig freigegeben")
+        let p2 = try pending("d2"), p3 = try pending("d3")
+        check(p2 && !p3 && store.releaseLegacyDryRun() == 0, "Probelauf: nur Mails ohne echte Aktion, und nur einmal")
+
+        // Pause: Lokales wird auch dann angewendet, wenn die Analyse scheitert
+        let f = Flag()
+        let sema = DispatchSemaphore(value: 0)
+        Task.detached {
+            do {
+                try await CyclePipeline.run(analyze: { f.analyzed = true; throw ClaudeError.blocked("Pause bis 12:00") }, apply: { f.applied = true })
+            } catch { f.thrown = error }
+            sema.signal()
+        }
+        sema.wait()
+        check(f.analyzed && f.applied && (f.thrown as? ClaudeError)?.isBlocking == true, "Pause: Einsortieren läuft trotz Analysefehler, der Fehler bleibt erhalten")
+        let g = Flag()
+        let sema2 = DispatchSemaphore(value: 0)
+        Task.detached {
+            do { try await CyclePipeline.run(analyze: { g.analyzed = true }, apply: { g.applied = true }) } catch { g.thrown = error }
+            sema2.signal()
+        }
+        sema2.wait()
+        check(g.analyzed && g.applied && g.thrown == nil, "Pause: ohne Fehler laufen beide Schritte normal")
+
+        // Rechnungen entfernen: nicht erneut auslesen
+        try analyzed("k1", category: "Rechnungen")
+        func queued() throws -> Bool { try store.invoiceQueue(category: "Rechnungen", accounts: ["iCloud"], limit: 10).contains { $0.messageId == "k1" } }
+        let q0 = try queued()
+        try store.saveInvoice(FeatureSelfTest.invoice("k1"))
+        try store.deleteInvoice("k1")
+        let requeued = try queued()
+        try store.skipInvoice("k1")
+        let q1 = try queued()
+        check(q0 && requeued && !q1 && store.invoiceQueueCount(category: "Rechnungen", accounts: ["iCloud"]) == 0,
+              "Rechnungen: ohne Merken käme die Mail zurück, entfernte Mails werden nicht erneut ausgelesen")
+        try store.unskipInvoice("k1")
+        let q2 = try queued()
+        check(q2, "Rechnungen: Neu auslesen hebt das Entfernen auf")
+
+        // Archivierung: gealterte Info-Mails, einmal vorgeschlagen
+        func aged(_ id: String, daysAgo: Double, status: ThreadStatus, mailbox: String? = nil) throws {
+            try analyzed(id, daysAgo: daysAgo)
+            try store.markActioned(id)
+            if let mailbox { try store.updateLocation(id, mailbox: mailbox, mailId: 0) }
+            try store.upsert(FeatureSelfTest.thread(id, status: status, lastFromMe: false, daysAgo: daysAgo))
+        }
+        try aged("a1", daysAgo: 40, status: .info)
+        try aged("a2", daysAgo: 40, status: .waiting)
+        try aged("a3", daysAgo: 40, status: .done, mailbox: "Claude/Newsletter")
+        try aged("a4", daysAgo: 5, status: .info)
+        try aged("a5", daysAgo: 40, status: .done, mailbox: "Claude/Archiv")
+        let cutoff = Date().addingTimeInterval(-30 * 86400)
+        func cands() throws -> [String] {
+            try store.archiveCandidates(accounts: ["iCloud"], archivePath: "Claude/Archiv", prefix: "Claude/", before: cutoff, limit: 50).map(\.messageId).sorted()
+        }
+        let c1 = try cands()
+        check(c1 == ["a1"], "Archivierung: nur alte Info-/Erledigt-Mails im Posteingang (\(c1))")
+        store.markArchiveTried(["a1"])
+        let c2 = try cands()
+        check(c2.isEmpty, "Archivierung: jede Mail wird nur einmal vorgeschlagen")
+        let c3 = try store.archiveCandidates(accounts: ["iCloud"], archivePath: "Archiv", prefix: "", before: cutoff, limit: 50).map(\.messageId).sorted()
+        check(c3.contains("a3") && !c3.contains("a1"), "Archivierung: ohne Ordner-Präfix gilt nur der Archivordner als Ausschluss")
     }
 
     static func latestTests(_ tmp: URL) throws {

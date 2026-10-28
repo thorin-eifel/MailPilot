@@ -59,7 +59,7 @@ struct InvoicesView: View {
             Button("Entfernen", role: .destructive) { engine.removeInvoices(Array(selection)); selection = [] }
             Button("Abbrechen", role: .cancel) {}
         } message: {
-            Text("Die Mails bleiben unverändert; nur die ausgelesenen Daten werden gelöscht. „Neu auslesen“ holt sie zurück.")
+            Text("Die Mails bleiben unverändert; nur die ausgelesenen Daten werden gelöscht. MailPilot liest diese Mails nicht erneut aus.")
         }
     }
 

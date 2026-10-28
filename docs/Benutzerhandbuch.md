@@ -51,7 +51,7 @@ Beim ersten Start katalogisiert MailPilot den kompletten Posteingang jedes aktiv
 
 **Verschieben freigeben:** Unter *Einstellungen → Konten* steht bei jedem Konto „Verschieben aus – ungeprüft“. Mit **Verschieben testen …** erlaubst du eine einzelne Probe-Verschiebung; klappt sie, gilt das Konto als geprüft.
 
-**Vorsicht beim Probelauf:** Der **Probelauf** (*Einstellungen → Automatik*) protokolliert nur („Würde nach Claude/Rechnungen verschieben“) und ändert nichts in Mail. MailPilot merkt sich aber, dass diese Mails abgearbeitet sind. Schaltest du den Probelauf später aus, werden sie **nicht nachträglich** verschoben oder markiert; nur neue Mails sind betroffen. In Konten ohne Verschiebe-Freigabe zeigt der Probelauf zudem keine Verschiebungen. Nutze ihn deshalb am besten für ein Konto, das du ohnehin erst später freischaltest, oder für einen kurzen Blick auf neue Mails.
+**Probelauf:** Der **Probelauf** (*Einstellungen → Automatik*) protokolliert nur („Würde nach Claude/Rechnungen verschieben“) und ändert nichts in Mail. Unter *Aktivität* siehst du, was passieren würde. Schaltest du ihn aus, holt MailPilot beim nächsten Durchlauf nach, was der Probelauf nur durchgespielt hat; Flaggen setzt es dabei nur bei Mails der letzten 14 Tage. In Konten ohne Verschiebe-Freigabe zeigt der Probelauf keine Verschiebungen.
 
 ### Konten auswählen
 
@@ -194,7 +194,7 @@ Unter *Einstellungen → Kategorien* bearbeitest du pro Kategorie:
 
 Du kannst Kategorien hinzufügen, löschen oder mit *Standard wiederherstellen* zurücksetzen. Unter *Einstellungen → Claude → Eigene Anweisungen* gibst du Claude zusätzliche Hinweise (Tonalität, Signatur, wichtige Personen).
 
-Mails mit hoher Priorität werden rot markiert, sofern keine Regel eine andere Flagge setzt. Beim Einsortieren gilt außerdem: Ist eine Mail älter als die eingestellte Zeit (Standard: 30 Tage), gehört zu einem Gespräch mit Status *Info* oder *Erledigt* und hat keinen eigenen Kategorie-Ordner, kommt sie in den Archivordner (`Claude/Archiv`). Das geschieht nur beim Einsortieren (typischerweise im Erstscan oder beim Anwenden von Regeln), nicht nachträglich, wenn eine Mail erst später altert.
+Mails mit hoher Priorität werden rot markiert, sofern keine Regel eine andere Flagge setzt. Außerdem gilt: Ist eine Mail älter als die eingestellte Zeit (Standard: 30 Tage, mindestens aber 15 Tage), gehört zu einem Gespräch mit Status *Info* oder *Erledigt* und hat keinen eigenen Kategorie-Ordner, kommt sie in den Archivordner (`Claude/Archiv`). Das geschieht beim Einsortieren und danach laufend für Mails, die später altern, aber nur in Konten mit geprüftem Verschieben und höchstens 200 Mails je Durchlauf. Jede Mail wird nur einmal geprüft: Hast du sie selbst woanders abgelegt oder holst du sie aus dem Archiv zurück, greift MailPilot nicht erneut ein.
 
 **Wichtig:** Einige Funktionen erkennen Kategorien am Namen: *Newsletter* (Newsletter-Bereich, Vorfilter), *Benachrichtigungen* (Vorfilter), *Termine* (Einladungssuche), *Werbung* und *Newsletter* (keine automatischen Fristen) sowie die in den Einstellungen gewählte Rechnungs-Kategorie. Benenne diese Kategorien nicht um und lösche sie nicht, sonst fallen die jeweiligen Funktionen weg.
 
@@ -282,7 +282,7 @@ Pro Mail werden bis zu 3 PDF-Anhänge (je höchstens 12 MB) gelesen, davon die e
 
 Die Fälligkeit wird zur Frist des Gesprächs (und damit auf Wunsch zur Erinnerung), sofern das Gespräch noch keine Frist hat. Überfällige und innerhalb von 14 Tagen fällige Rechnungen erscheinen im Briefing. Mit „Rechnungen aus Mails und PDF-Anhängen auslesen“ in den Einstellungen schaltest du die Funktion ab.
 
-**Hinweis zu „Entfernen“:** Entfernte Einträge sind nicht dauerhaft weg. Die Mail liegt weiter in der Rechnungs-Kategorie und wird beim nächsten Durchlauf erneut ausgelesen. Um eine Mail dauerhaft loszuwerden, ändere ihre Kategorie.
+**„Entfernen“** löscht nur die ausgelesenen Daten; die Mail bleibt unverändert und wird nicht erneut ausgelesen.
 
 Prüfe ausgelesene Beträge immer stichprobenartig – die Erkennung kann sich irren.
 
@@ -381,7 +381,7 @@ Solche Gespräche sind als *Vertraulich* gekennzeichnet. MailPilot sortiert sie 
 
 Was du gezielt per Knopf auslöst (Entwurf neu schreiben, Briefing, Wochenbericht oder Stil neu erstellen, Rechnungen auslesen, Verbindung testen), läuft trotzdem. **Nicht dazu gehören „Jetzt prüfen“ und „Prüfen“:** Sie starten einen normalen Durchlauf und respektieren die Pause.
 
-**Folge der Pause:** Muss in einem Durchlauf eine Mail von Claude analysiert werden, bricht der Durchlauf ab. Das Verschieben und Markieren, Korrekturerkennung, Fristen und Sicherung warten dann bis zum Ende der Pause, auch für Mails, die MailPilot lokal einordnen könnte.
+**Während der Pause:** MailPilot liest weiter neue Mails und sortiert und markiert, was es ohne Claude entscheiden kann (Regeln, VIPs, Vorfilter, vertrauliche Mails). Mails, die Claude analysieren müsste, warten bis zum Ende der Pause. Das Briefing und andere Claude-Aufgaben pausieren ebenfalls.
 
 **Aufrufe grob:** Eine Mail unter 14 Tagen kostet einen Aufruf, zehn ältere Mails einen gemeinsamen. Dazu kommen Nachfass-Entwürfe (höchstens 3 je Durchlauf), Rechnungen (höchstens 6 je Durchlauf), Briefing, Wochenbericht und Stil. Newsletter und Systemmeldungen sowie Regeln mit „Ohne Claude“ sparen Aufrufe, unter *Claude-Nutzung → Ohne Claude* siehst du, wie viele.
 
