@@ -17,7 +17,15 @@ final class Engine: ObservableObject {
         var fraction: Double { total > 0 ? min(1, Double(analyzed) / Double(total)) : 0 }
     }
 
-    @Published var settings: AppSettings { didSet { settings.save(to: Paths.settings); if oldValue.pollMinutes != settings.pollMinutes { schedule() } } }
+    @Published var settings: AppSettings {
+        didSet {
+            settings.save(to: Paths.settings)
+            if oldValue.pollMinutes != settings.pollMinutes { schedule() }
+            if oldValue.enabledAccounts != settings.enabledAccounts { accountsChanged() }
+        }
+    }
+    /// Alle aktiven Konten in Apple Mail.
+    @Published private(set) var accounts: [MailAccountInfo] = []
     @Published private(set) var threads: [MailThread] = []
     @Published private(set) var activity: [ActivityEntry] = []
     @Published private(set) var briefing: Briefing?
@@ -36,8 +44,9 @@ final class Engine: ObservableObject {
     /// Abbruchgrund innerhalb paralleler Analysen (z. B. Claude nicht angemeldet oder Limit erreicht).
     private var abortError: Error?
 
-    private(set) var initialComplete: Bool {
-        didSet { store.setValue(initialComplete ? "1" : nil, for: "initialComplete") }
+    /// Konten, deren Posteingang bereits vollständig katalogisiert wurde.
+    private var scannedAccounts: Set<String> {
+        didSet { store.setValue(scannedAccounts.sorted().joined(separator: "\n"), for: "scannedAccounts") }
     }
 
     /// Mails jünger als diese Grenze werden einzeln mit Verlauf und Entwurf analysiert, ältere im Paket.
@@ -46,7 +55,7 @@ final class Engine: ObservableObject {
     private init() {
         do { store = try Store() } catch { fatalError("Datenbank: \(error)") }
         settings = AppSettings.load(from: Paths.settings)
-        initialComplete = store.value("initialComplete") == "1"
+        scannedAccounts = Set((store.value("scannedAccounts") ?? "").split(separator: "\n").map(String.init))
         myAddresses = (store.value("myAddresses") ?? "").split(separator: ",").map(String.init)
         reload()
     }
@@ -57,6 +66,42 @@ final class Engine: ObservableObject {
 
     // MARK: Abgeleitete Werte
 
+    /// Konten, auf denen MailPilot laufen darf (gemäß Auswahl in den Einstellungen).
+    var enabledAccountNames: [String] { accounts.map(\.name).filter(settings.isEnabled) }
+
+    /// Freigegebene Konten, für die der Erstscan noch aussteht.
+    var pendingScanAccounts: [String] { enabledAccountNames.filter { !scannedAccounts.contains($0) } }
+
+    var initialComplete: Bool { !accounts.isEmpty && pendingScanAccounts.isEmpty }
+
+    func isScanned(_ account: String) -> Bool { scannedAccounts.contains(account) }
+
+    func setAccount(_ name: String, enabled: Bool) {
+        var list = settings.enabledAccounts ?? accounts.map(\.name)
+        list.removeAll { $0 == name }
+        if enabled { list.append(name) }
+        settings.enabledAccounts = list
+    }
+
+    func refreshAccounts() async {
+        do {
+            accounts = try await bridge.listAccounts()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func accountsChanged() {
+        reload()
+        guard started else { return }
+        if !pendingScanAccounts.isEmpty {
+            Task { await runInitialScan() }
+        } else if enabledAccountNames.isEmpty {
+            loop?.cancel()
+            status = "Kein Konto ausgewählt"
+        }
+    }
+
     var needsReply: [MailThread] { threads.filter { $0.status == .needsReply } }
     var waiting: [MailThread] { threads.filter { $0.status == .waiting } }
     var overdue: [MailThread] { waiting.filter { $0.isOverdue(followUpDays: settings.followUpDays) } }
@@ -66,7 +111,7 @@ final class Engine: ObservableObject {
     }
 
     func reload() {
-        threads = (try? store.threads()) ?? []
+        threads = (try? store.threads(accounts: enabledAccountNames)) ?? []
         activity = (try? store.activity()) ?? []
         briefing = try? store.latestBriefing()
     }
@@ -79,10 +124,10 @@ final class Engine: ObservableObject {
         guard !started else { return }
         started = true
         requestNotificationPermission()
-        if initialComplete {
-            schedule()
-        } else {
-            Task { await runInitialScan() }
+        Task {
+            await refreshAccounts()
+            reload()
+            if initialComplete { schedule() } else { await runInitialScan() }
         }
     }
 
@@ -101,35 +146,45 @@ final class Engine: ObservableObject {
 
     // MARK: Erstscan
 
-    /// Katalogisiert den gesamten Posteingang und sortiert ihn ein. Wird bei Abbruch beim nächsten Start fortgesetzt.
+    /// Katalogisiert die kompletten Posteingänge aller freigegebenen, noch nicht gescannten Konten und sortiert sie ein.
+    /// Wird bei Abbruch beim nächsten Start fortgesetzt; kommen währenddessen Konten hinzu, folgt ein weiterer Scan.
     func runInitialScan() async {
-        guard !initialComplete, !isRunning else { return }
+        guard !isRunning else { return }
+        let targets = pendingScanAccounts
+        guard !targets.isEmpty else { schedule(); return }
+        loop?.cancel()
         isRunning = true
-        defer { isRunning = false; lastRun = Date(); reload() }
 
-        while !initialComplete {
+        while true {
             do {
                 guard let claude else { throw ClaudeError.notFound }
                 lastError = nil
-                try await initialPass(claude: claude)
+                try await initialPass(claude: claude, accounts: targets)
                 status = "Erstscan: erstelle Briefing …"
                 try? await generateBriefing(claude: claude)
-                initialComplete = true
+                scannedAccounts.formUnion(targets)
                 initialProgress = nil
                 status = "Erstscan abgeschlossen"
+                let c = store.progressCounts(accounts: targets)
                 notify(title: "MailPilot: Erstscan abgeschlossen",
-                       body: "\(store.progressCounts().analyzed) Mails katalogisiert, \(store.progressCounts().moved) einsortiert.", id: "initial")
+                       body: "\(c.analyzed) Mails katalogisiert, \(c.moved) einsortiert.", id: "initial")
+                break
             } catch {
                 lastError = error.localizedDescription
                 status = "Erstscan unterbrochen – neuer Versuch in 5 Minuten"
                 try? await Task.sleep(for: .seconds(300))
             }
         }
-        schedule()
+
+        isRunning = false
+        lastRun = Date()
+        reload()
+        if pendingScanAccounts.isEmpty { schedule() } else { await runInitialScan() }
     }
 
-    private func initialPass(claude: ClaudeClient) async throws {
-        var next: FetchResult? = try await fetchInitial()
+    private func initialPass(claude: ClaudeClient, accounts: [String]) async throws {
+        progressAccounts = accounts
+        var next: FetchResult? = try await fetchInitial(accounts: accounts)
         var emptyRounds = 0
         while let result = next {
             if result.messages.isEmpty {
@@ -142,7 +197,7 @@ final class Engine: ObservableObject {
             updateProgress(remaining: result.remaining)
 
             // Nächsten Block schon lesen, während Claude den aktuellen analysiert.
-            let prefetch: Task<FetchResult, Error>? = result.remaining > 0 ? Task { try await self.fetchInitial() } : nil
+            let prefetch: Task<FetchResult, Error>? = result.remaining > 0 ? Task { try await self.fetchInitial(accounts: accounts) } : nil
             try await analyzePending(claude: claude)
             next = try await prefetch?.value
             try await applyPendingActions(initial: true)
@@ -153,15 +208,18 @@ final class Engine: ObservableObject {
         try await applyPendingActions(initial: true)
     }
 
-    private func fetchInitial() async throws -> FetchResult {
+    private func fetchInitial(accounts: [String]) async throws -> FetchResult {
         let known = try store.knownMessageIds(since: .distantPast)
         let sentSince = Date().addingTimeInterval(-Double(max(settings.lookbackDays, 30)) * 86400)
-        return try await bridge.fetch(since: Date(timeIntervalSince1970: 0), sentSince: sentSince, known: known,
-                                      maxNew: 150, includeSent: settings.includeSent, contentLimit: 3000)
+        return try await bridge.fetch(since: Date(timeIntervalSince1970: 0), sentSince: sentSince, accounts: accounts,
+                                      known: known, maxNew: 150, includeSent: settings.includeSent, contentLimit: 3000)
     }
 
+    /// Konten, auf die sich die Fortschrittsanzeige des laufenden Erstscans bezieht.
+    private var progressAccounts: [String] = []
+
     private func updateProgress(remaining: Int) {
-        let c = store.progressCounts()
+        let c = store.progressCounts(accounts: progressAccounts)
         initialProgress = InitialProgress(total: c.total + remaining, analyzed: c.analyzed, moved: c.moved)
         status = "Erstscan: \(c.analyzed) von \(c.total + remaining) analysiert, \(c.moved) einsortiert"
     }
@@ -180,7 +238,7 @@ final class Engine: ObservableObject {
             status = "Lese Apple Mail …"
             let since = Date().addingTimeInterval(-Double(settings.lookbackDays) * 86400)
             let known = try store.knownMessageIds(since: since.addingTimeInterval(-86400))
-            let result = try await bridge.fetch(since: since, known: known, maxNew: settings.maxPerCycle,
+            let result = try await bridge.fetch(since: since, accounts: enabledAccountNames, known: known, maxNew: settings.maxPerCycle,
                                                 includeSent: settings.includeSent)
             try ingest(result)
             try await analyzePending(claude: claude)
@@ -207,7 +265,7 @@ final class Engine: ObservableObject {
 
     /// Analysiert alle noch offenen Nachrichten: neuere einzeln (mit Verlauf und Entwurf), ältere in Paketen.
     private func analyzePending(claude: ClaudeClient) async throws {
-        let pending = try store.unprocessedMessages(limit: 100_000)
+        let pending = try store.unprocessedMessages(limit: 100_000, accounts: enabledAccountNames)
         guard !pending.isEmpty else { return }
         abortError = nil
 
@@ -258,7 +316,7 @@ final class Engine: ObservableObject {
         } catch {
             handle(error, for: chunk.map(\.0))
         }
-        if initialProgress != nil { updateProgress(remaining: initialProgress.map { $0.total - store.progressCounts().total } ?? 0) }
+        if initialProgress != nil { updateProgress(remaining: initialProgress.map { $0.total - store.progressCounts(accounts: progressAccounts).total } ?? 0) }
     }
 
     private func analyzeSingle(_ m: StoredMessage, key: String, claude: ClaudeClient) async {
@@ -272,8 +330,8 @@ final class Engine: ObservableObject {
         } catch {
             handle(error, for: [m])
         }
-        if initialProgress != nil { updateProgress(remaining: initialProgress.map { $0.total - store.progressCounts().total } ?? 0) }
-        threads = (try? store.threads()) ?? threads
+        if initialProgress != nil { updateProgress(remaining: initialProgress.map { $0.total - store.progressCounts(accounts: progressAccounts).total } ?? 0) }
+        threads = (try? store.threads(accounts: enabledAccountNames)) ?? threads
     }
 
     private func handle(_ error: Error, for messages: [StoredMessage]) {
@@ -336,7 +394,7 @@ final class Engine: ObservableObject {
         let archiveCutoff = Date().addingTimeInterval(-Double(settings.archiveAfterDays) * 86400)
 
         while true {
-            let pending = try store.pendingActions(limit: 50)
+            let pending = try store.pendingActions(limit: 50, accounts: enabledAccountNames)
             if pending.isEmpty { return }
             var items: [MailBridge.BatchItem] = []
             var byId: [String: StoredMessage] = [:]

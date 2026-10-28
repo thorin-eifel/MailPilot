@@ -48,8 +48,11 @@ enum SelfTest {
         Task.detached {
             let bridge = MailBridge()
             do {
+                let accounts = try await bridge.listAccounts()
+                print("Konten: " + accounts.map { "\($0.name) (\($0.inboxCount))" }.joined(separator: ", "))
                 let start = Date()
-                let r = try await bridge.fetch(since: Date().addingTimeInterval(-86400), known: [], maxNew: 5, includeSent: true, contentLimit: 200)
+                let r = try await bridge.fetch(since: Date().addingTimeInterval(-86400), accounts: accounts.map(\.name), known: [],
+                                               maxNew: 5, includeSent: true, contentLimit: 200)
                 print("Mail: \(r.messages.count) Nachrichten gelesen (+\(r.remaining) weitere) in \(String(format: "%.1f", Date().timeIntervalSince(start))) s")
                 print("Eigene Adressen: \(r.myAddresses.count)")
                 for m in r.messages {
@@ -69,7 +72,7 @@ enum SelfTest {
                 if CommandLine.arguments.contains("--batch") {
                     do {
                         let store = try Store()
-                        let msgs = Array(try store.unprocessedMessages(limit: 10))
+                        let msgs = Array(try store.unprocessedMessages(limit: 10, accounts: try await MailBridge().listAccounts().map(\.name)))
                         let start = Date()
                         let r = try await client.classifyBatch(msgs, settings: s, myAddresses: [])
                         print("Paket: \(r.count)/\(msgs.count) in \(Int(Date().timeIntervalSince(start))) s")
@@ -93,9 +96,11 @@ enum SelfTest {
         do {
             let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mailpilot-selftest-\(UUID()).sqlite")
             let store = try Store(path: tmp)
-            let r = try await MailBridge().fetch(since: Date().addingTimeInterval(-86400), known: [], maxNew: 3, includeSent: false)
+            let bridge = MailBridge()
+            let accounts = try await bridge.listAccounts().map(\.name)
+            let r = try await bridge.fetch(since: Date().addingTimeInterval(-86400), accounts: accounts, known: [], maxNew: 3, includeSent: false)
             for raw in r.messages { try store.insert(raw, myAddresses: Set(r.myAddresses)) }
-            for m in try store.unprocessedMessages(limit: 3) {
+            for m in try store.unprocessedMessages(limit: 3, accounts: accounts) {
                 let start = Date()
                 let key = try store.resolveThreadKey(for: m)
                 let a = try await client.analyze(message: m, thread: nil, history: [], settings: settings, myAddresses: r.myAddresses)

@@ -147,8 +147,14 @@ final class Store: @unchecked Sendable {
               raw.references.joined(separator: " "), raw.content])
     }
 
-    func unprocessedMessages(limit: Int) throws -> [StoredMessage] {
-        try db.query("SELECT * FROM messages WHERE processed = 0 ORDER BY date ASC LIMIT ?", [limit]).map(message)
+    /// `IN (?, ?, …)`-Klausel für eine Kontenliste.
+    private func inList(_ accounts: [String]) -> String {
+        accounts.isEmpty ? "('')" : "(" + accounts.map { _ in "?" }.joined(separator: ",") + ")"
+    }
+
+    func unprocessedMessages(limit: Int, accounts: [String]) throws -> [StoredMessage] {
+        try db.query("SELECT * FROM messages WHERE processed = 0 AND account IN \(inList(accounts)) ORDER BY date ASC LIMIT ?",
+                     accounts + [limit]).map(message)
     }
 
     func messages(inThread key: String, limit: Int = 50) throws -> [StoredMessage] {
@@ -169,20 +175,20 @@ final class Store: @unchecked Sendable {
     }
 
     /// Analysierte eingegangene Mails, auf die noch keine Aktion angewendet wurde.
-    func pendingActions(limit: Int) throws -> [StoredMessage] {
+    func pendingActions(limit: Int, accounts: [String]) throws -> [StoredMessage] {
         try db.query("""
             SELECT * FROM messages WHERE processed = 1 AND actioned = 0 AND is_from_me = 0 AND category IS NOT NULL
-            ORDER BY date ASC LIMIT ?
-            """, [limit]).map(message)
+            AND account IN \(inList(accounts)) ORDER BY date ASC LIMIT ?
+            """, accounts + [limit]).map(message)
     }
 
     func markActioned(_ messageId: String) throws {
         try db.exec("UPDATE messages SET actioned = 1 WHERE message_id = ?", [messageId])
     }
 
-    func progressCounts() -> (total: Int, analyzed: Int, moved: Int) {
-        let r = (try? db.query("SELECT COUNT(*) AS t, SUM(processed != 0) AS a FROM messages"))?.first
-        let moved = (try? db.query("SELECT COUNT(*) AS n FROM activity WHERE kind = 'move' AND dry_run = 0 AND undone = 0"))?.first?.int("n") ?? 0
+    func progressCounts(accounts: [String]) -> (total: Int, analyzed: Int, moved: Int) {
+        let r = (try? db.query("SELECT COUNT(*) AS t, SUM(processed != 0) AS a FROM messages WHERE account IN \(inList(accounts))", accounts))?.first
+        let moved = (try? db.query("SELECT COUNT(*) AS n FROM activity WHERE kind = 'move' AND dry_run = 0 AND undone = 0 AND account IN \(inList(accounts))", accounts))?.first?.int("n") ?? 0
         return (r?.int("t") ?? 0, r?.int("a") ?? 0, moved)
     }
 
@@ -253,8 +259,13 @@ final class Store: @unchecked Sendable {
         try db.query("SELECT * FROM threads WHERE thread_key = ?", [key]).first.map(thread)
     }
 
-    func threads(limit: Int = 500) throws -> [MailThread] {
-        try db.query("SELECT * FROM threads ORDER BY last_date DESC LIMIT ?", [limit]).map(thread)
+    /// Gespräche, an denen mindestens eine Nachricht aus einem der Konten beteiligt ist.
+    func threads(accounts: [String], limit: Int = 500) throws -> [MailThread] {
+        try db.query("""
+            SELECT * FROM threads WHERE thread_key IN
+                (SELECT thread_key FROM messages WHERE account IN \(inList(accounts)))
+            ORDER BY last_date DESC LIMIT ?
+            """, accounts + [limit]).map(thread)
     }
 
     func upsert(_ t: MailThread) throws {

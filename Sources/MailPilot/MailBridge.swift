@@ -25,6 +25,7 @@ final class MailBridge: @unchecked Sendable {
     private let fetchScript: URL
     private let actionScript: URL
     private let batchScript: URL
+    private let accountsScript: URL
 
     init() {
         fetchScript = Paths.scripts.appendingPathComponent("fetch.js")
@@ -33,11 +34,20 @@ final class MailBridge: @unchecked Sendable {
         try? Self.fetchJS.write(to: fetchScript, atomically: true, encoding: .utf8)
         try? Self.actionJS.write(to: actionScript, atomically: true, encoding: .utf8)
         try? Self.batchJS.write(to: batchScript, atomically: true, encoding: .utf8)
+        accountsScript = Paths.scripts.appendingPathComponent("accounts.js")
+        try? Self.accountsJS.write(to: accountsScript, atomically: true, encoding: .utf8)
     }
 
-    func fetch(since: Date, sentSince: Date? = nil, known: [String], maxNew: Int, includeSent: Bool,
+    func listAccounts() async throws -> [MailAccountInfo] {
+        let out = try await run(accountsScript, [:])
+        return try JSONDecoder().decode([MailAccountInfo].self, from: Data(out.utf8))
+    }
+
+    /// Liest neue Nachrichten aus den Posteingängen (und ggf. Gesendet) der angegebenen Konten.
+    func fetch(since: Date, sentSince: Date? = nil, accounts: [String], known: [String], maxNew: Int, includeSent: Bool,
                contentLimit: Int = 6000) async throws -> FetchResult {
         let params: [String: Any] = [
+            "accounts": accounts,
             "since": since.isoString,
             "sentSince": (sentSince ?? since).isoString,
             "known": known,
@@ -191,10 +201,40 @@ final class MailBridge: @unchecked Sendable {
         }
       }
 
+      // Nur die Posteingänge (und Gesendet-Ordner) der freigegebenen Konten lesen.
+      const wanted = {};
+      p.accounts.forEach(a => { wanted[a] = true; });
+      const accountOf = mb => { try { return mb.account().name(); } catch (e) { return ''; } };
       // Beim Vollscan ohne Datumsfilter lesen: „whose“ über Tausende Mails läuft in einen AppleEvent-Timeout.
       const fullScan = since.getFullYear() < 1980;
-      collect(fullScan ? Mail.inbox.messages : Mail.inbox.messages.whose({ dateReceived: { _greaterThan: since } }), false);
-      if (p.includeSent) collect(Mail.sentMailbox.messages.whose({ dateSent: { _greaterThan: sentSince } }), true);
+      for (const mb of Mail.inbox.mailboxes()) {
+        if (!wanted[accountOf(mb)]) continue;
+        collect(fullScan ? mb.messages : mb.messages.whose({ dateReceived: { _greaterThan: since } }), false);
+      }
+      if (p.includeSent) {
+        for (const mb of Mail.sentMailbox.mailboxes()) {
+          if (!wanted[accountOf(mb)]) continue;
+          collect(mb.messages.whose({ dateSent: { _greaterThan: sentSince } }), true);
+        }
+      }
+      return JSON.stringify(out);
+    }
+    """#
+
+    private static let accountsJS = #"""
+    function run(argv) {
+      const Mail = Application('Mail');
+      const counts = {};
+      for (const mb of Mail.inbox.mailboxes()) {
+        try { counts[mb.account().name()] = mb.messages.length; } catch (e) {}
+      }
+      const names = Mail.accounts.name();
+      const emails = Mail.accounts.emailAddresses();
+      const enabled = Mail.accounts.enabled();
+      const out = [];
+      names.forEach((n, i) => {
+        if (enabled[i]) out.push({ name: n, emails: emails[i].map(String), inboxCount: counts[n] || 0 });
+      });
       return JSON.stringify(out);
     }
     """#

@@ -9,6 +9,8 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            AccountsSection()
+
             Section("Automatik") {
                 Toggle("Mails automatisch in Ordner verschieben", isOn: $engine.settings.autoMove)
                 Toggle("Mails automatisch markieren (Flagge)", isOn: $engine.settings.autoFlag)
@@ -115,5 +117,64 @@ struct CategoryEditor: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// Auswahl der Mail-Konten, auf denen MailPilot arbeiten darf.
+struct AccountsSection: View {
+    @EnvironmentObject var engine: Engine
+    @ViewState private var refreshing = false
+
+    var body: some View {
+        Section {
+            if engine.accounts.isEmpty {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Lese Konten aus Apple Mail …").foregroundStyle(.secondary)
+                }
+            }
+            ForEach(engine.accounts) { account in
+                Toggle(isOn: Binding(
+                    get: { engine.settings.isEnabled(account.name) },
+                    set: { engine.setAccount(account.name, enabled: $0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(account.name).fontWeight(.medium)
+                        Text(account.emails.joined(separator: ", "))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        HStack(spacing: 6) {
+                            Text("\(account.inboxCount) Mails im Posteingang").font(.caption).foregroundStyle(.secondary)
+                            if engine.settings.isEnabled(account.name) {
+                                if engine.isScanned(account.name) {
+                                    Badge(text: "Erstscan erledigt", color: .green)
+                                } else {
+                                    Badge(text: "Erstscan ausstehend", color: .orange)
+                                }
+                            }
+                        }
+                    }
+                }
+                .toggleStyle(.switch)
+            }
+            HStack {
+                Button("Alle") { engine.settings.enabledAccounts = engine.accounts.map(\.name) }
+                Button("Keine") { engine.settings.enabledAccounts = [] }
+                Spacer()
+                if refreshing { ProgressView().controlSize(.small) }
+                Button("Konten neu laden") {
+                    refreshing = true
+                    Task {
+                        await engine.refreshAccounts()
+                        refreshing = false
+                    }
+                }
+            }
+        } header: {
+            Text("Konten")
+        } footer: {
+            Text("MailPilot liest, sortiert und verfolgt nur Mails der aktivierten Konten. Ein neu aktiviertes Konto wird zuerst komplett gescannt und einsortiert, danach läuft der Zeitplan weiter. Deaktivierte Konten bleiben unverändert.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .task { if engine.accounts.isEmpty { await engine.refreshAccounts() } }
     }
 }

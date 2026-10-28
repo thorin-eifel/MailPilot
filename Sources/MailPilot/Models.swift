@@ -73,6 +73,13 @@ struct RawMessage: Decodable {
     var isSent: Bool
 }
 
+struct MailAccountInfo: Decodable, Identifiable, Hashable {
+    var name: String
+    var emails: [String]
+    var inboxCount: Int
+    var id: String { name }
+}
+
 struct StoredMessage: Identifiable, Hashable {
     var messageId: String
     var mailId: Int
