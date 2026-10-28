@@ -31,6 +31,7 @@ enum SelfTest2 {
             try exportTests(tmp)
             try prefilterTests(tmp)
             try latestTests(tmp)
+            try retryTests(tmp)
         } catch {
             check(false, "Tests liefen ohne Fehler: \(error)")
         }
@@ -481,6 +482,29 @@ enum SelfTest2 {
     }
 
     // MARK: Einladungen, freie Zeiten, Kontakte, Mitteilungen
+
+    // MARK: Wiederholung fehlgeschlagener Analysen
+
+    static func retryTests(_ tmp: URL) throws {
+        let store = try Store(path: tmp.appendingPathComponent("retry.sqlite"))
+        try store.insert(raw("r1", subject: "Retry"), myAddresses: [])
+        func queued() throws -> Bool { try store.unprocessedMessages(limit: 10, accounts: ["iCloud"]).contains { $0.messageId == "r1" } }
+        check(try queued(), "Wiederholung: neue Mail ist in der Warteschlange")
+        try store.markFailed("r1", error: "x", giveUp: false)
+        check(try queued(), "Wiederholung: Login-/Limit-Fehler zählt nicht als Fehlversuch")
+        try store.markFailed("r1", error: "kaputt", giveUp: true)
+        check(try !queued(), "Wiederholung: nach einem Fehlversuch gilt die Wartezeit")
+        try store.db.exec("UPDATE messages SET failed_at = ? WHERE message_id = 'r1'", [Date().addingTimeInterval(-Store.retryDelay - 60)])
+        check(try queued(), "Wiederholung: nach der Wartezeit wird erneut versucht")
+        try store.markFailed("r1", error: "kaputt", giveUp: true)
+        try store.markFailed("r1", error: "kaputt", giveUp: true)
+        let state = try store.db.query("SELECT processed FROM messages WHERE message_id = 'r1'").first?.int("processed")
+        check(state == 2, "Wiederholung: nach \(Store.maxAttempts) Fehlversuchen wird aufgegeben")
+        try store.db.exec("DELETE FROM kv WHERE key = 'revivedFailed'")
+        store.reviveGivenUpMessages()
+        let revived = try store.db.query("SELECT processed FROM messages WHERE message_id = 'r1'").first?.int("processed")
+        check(revived == 0, "Wiederholung: aufgegebene Mails werden einmalig freigegeben")
+    }
 
     static func latestTests(_ tmp: URL) throws {
         let utc = TimeZone(identifier: "UTC")!

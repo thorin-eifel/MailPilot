@@ -457,7 +457,8 @@ final class Engine: ObservableObject {
         let old = keyed.filter { $0.0.date < cutoff }
         let recent = keyed.filter { $0.0.date >= cutoff }
 
-        let chunks = stride(from: 0, to: old.count, by: 10).map { Array(old[$0..<min($0 + 10, old.count)]) }
+        let size = max(1, settings.batchSize)
+        let chunks = stride(from: 0, to: old.count, by: size).map { Array(old[$0..<min($0 + size, old.count)]) }
         // Ältere Mails im Paket mit dem günstigeren Modell.
         let bulk = claudeBulk ?? claude
         await runConcurrently(chunks, limit: 3) { chunk in

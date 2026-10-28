@@ -139,6 +139,8 @@ struct AppSettings: Codable, Equatable {
     var prefilterEnabled = true
     /// Günstigeres Modell für die Massenanalyse älterer Mails.
     var modelBulk = "haiku"
+    /// Ältere Mails je Claude-Aufruf in der Paketanalyse.
+    var batchSize = 10
     /// Erstscan: nur Mails der letzten X Tage (0 = alle).
     var initialScanDays = 180
     /// Namen aus der Kontakte-App verwenden, wenn die Mail keinen Namen enthält.
@@ -256,6 +258,7 @@ extension AppSettings {
         probeMoveAccounts = v(.probeMoveAccounts, probeMoveAccounts)
         prefilterEnabled = v(.prefilterEnabled, prefilterEnabled)
         modelBulk = v(.modelBulk, modelBulk)
+        batchSize = min(25, max(1, v(.batchSize, batchSize)))
         initialScanDays = v(.initialScanDays, initialScanDays)
         useContactNames = v(.useContactNames, useContactNames)
         vipContactGroup = v(.vipContactGroup, vipContactGroup)

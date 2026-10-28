@@ -37,6 +37,7 @@ struct SettingsView: View {
                 Stepper("Alle \(engine.settings.pollMinutes) Minuten prüfen", value: $engine.settings.pollMinutes, in: 1...120)
                 Stepper("Zeitraum: letzte \(engine.settings.lookbackDays) Tage", value: $engine.settings.lookbackDays, in: 1...30)
                 Stepper("Max. \(engine.settings.maxPerCycle) Mails pro Durchlauf", value: $engine.settings.maxPerCycle, in: 5...100, step: 5)
+                Stepper("Ältere Mails: \(engine.settings.batchSize) pro Claude-Aufruf", value: $engine.settings.batchSize, in: 1...25)
                 Stepper("Follow-up nach \(engine.settings.followUpDays) Tagen ohne Antwort", value: $engine.settings.followUpDays, in: 1...30)
                 Stepper("Tägliches Briefing ab \(engine.settings.briefingHour) Uhr", value: $engine.settings.briefingHour, in: 0...23)
                 Toggle("Beim Anmelden starten", isOn: $launchAtLogin)

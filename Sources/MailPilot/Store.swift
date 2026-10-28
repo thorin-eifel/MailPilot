@@ -88,6 +88,7 @@ final class Store: @unchecked Sendable {
         db = try Database(path: path.path)
         try migrate()
         try ensureSearchIndex()
+        reviveGivenUpMessages()
     }
 
     private func migrate() throws {
@@ -129,6 +130,8 @@ final class Store: @unchecked Sendable {
         try? db.exec("ALTER TABLE threads ADD COLUMN draft_kind TEXT")
         try? db.exec("ALTER TABLE messages ADD COLUMN decided_by TEXT")
         try? db.exec("ALTER TABLE messages ADD COLUMN moved_at REAL")
+        try? db.exec("ALTER TABLE messages ADD COLUMN attempts INTEGER DEFAULT 0")
+        try? db.exec("ALTER TABLE messages ADD COLUMN failed_at REAL")
         try db.exec("""
         CREATE TABLE IF NOT EXISTS corrections (
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, message_id TEXT, subject TEXT, account TEXT,
@@ -207,8 +210,11 @@ final class Store: @unchecked Sendable {
     }
 
     func unprocessedMessages(limit: Int, accounts: [String]) throws -> [StoredMessage] {
-        try db.query("SELECT * FROM messages WHERE processed = 0 AND account IN \(inList(accounts)) ORDER BY date ASC LIMIT ?",
-                     accounts + [limit]).map(message)
+        // Fehlgeschlagene Mails erst nach der Wartezeit wieder anfassen.
+        try db.query("""
+            SELECT * FROM messages WHERE processed = 0 AND (failed_at IS NULL OR failed_at < ?) AND account IN \(inList(accounts))
+            ORDER BY date ASC LIMIT ?
+            """, [Date().addingTimeInterval(-Store.retryDelay)] + accounts + [limit]).map(message)
     }
 
     func messages(inThread key: String, limit: Int = 50) throws -> [StoredMessage] {
@@ -248,8 +254,32 @@ final class Store: @unchecked Sendable {
         return (r?.int("t") ?? 0, r?.int("a") ?? 0, moved)
     }
 
+    /// Wie oft eine Analyse scheitern darf, bevor die Mail aufgegeben wird (processed = 2).
+    static let maxAttempts = 3
+    /// Wartezeit, bevor eine fehlgeschlagene Analyse erneut versucht wird.
+    static let retryDelay: TimeInterval = 15 * 60
+
+    /// `giveUp: false` = Problem außerhalb der Mail (Login, Limit): kein Fehlversuch, sofort wieder offen.
+    /// `giveUp: true` = Fehlversuch der Mail; erst nach `maxAttempts` wird sie endgültig übersprungen.
     func markFailed(_ messageId: String, error: String, giveUp: Bool) throws {
-        try db.exec("UPDATE messages SET error = ?, processed = ? WHERE message_id = ?", [error, giveUp ? 2 : 0, messageId])
+        guard giveUp else {
+            try db.exec("UPDATE messages SET error = ?, processed = 0 WHERE message_id = ?", [error, messageId])
+            return
+        }
+        try db.exec("""
+            UPDATE messages SET error = ?, attempts = COALESCE(attempts, 0) + 1, failed_at = ?,
+                processed = CASE WHEN COALESCE(attempts, 0) + 1 >= ? THEN 2 ELSE 0 END
+            WHERE message_id = ?
+            """, [error, Date(), Store.maxAttempts, messageId])
+    }
+
+    /// Gibt Mails, die vor der Wiederholungslogik endgültig aufgegeben wurden, einmalig frei (ein letzter Versuch).
+    func reviveGivenUpMessages() {
+        guard value("revivedFailed") == nil else { return }
+        try? db.exec("""
+            UPDATE messages SET processed = 0, attempts = ? WHERE processed = 2 AND error IS NOT NULL AND error != 'Stilarchiv'
+            """, [Store.maxAttempts - 1])
+        setValue("1", for: "revivedFailed")
     }
 
     func updateLocation(_ messageId: String, mailbox: String, mailId: Int) throws {
