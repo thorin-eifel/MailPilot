@@ -28,6 +28,7 @@ enum SelfTest2 {
             try newsletterTests(tmp)
             try flagTests(tmp)
             try backupTests(tmp)
+            plannerTests()
             try exportTests(tmp)
             try prefilterTests(tmp)
             try latestTests(tmp)

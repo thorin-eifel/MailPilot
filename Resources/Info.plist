@@ -25,7 +25,22 @@
     <key>NSContactsUsageDescription</key>
     <string>MailPilot zeigt Namen aus deinen Kontakten an und übernimmt auf Wunsch die Mitglieder einer Kontaktgruppe als VIP-Liste.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>
-    <string>MailPilot liest deine Termine, um freie Zeiten für Antworten vorzuschlagen und Überschneidungen mit Einladungen zu erkennen. Es werden nur Zeiten verwendet, keine Titel.</string>
+    <string>MailPilot zeigt deine Termine im Kalender-Bereich, legt Termine aus Mails an und schlägt freie Zeiten für Antworten vor. Für die freien Zeiten werden nur Zeiträume an Claude gegeben, keine Titel.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>MailPilot zeigt deine Erinnerungen, legt Erinnerungen aus Mails und Fristen an und hakt sie auf Wunsch ab.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>MailPilot zeigt und legt Erinnerungen an.</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>de.thorin.mailpilot.message</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>mailpilot</string>
+            </array>
+        </dict>
+    </array>
     <key>NSCalendarsUsageDescription</key>
     <string>MailPilot liest deine Termine, um freie Zeiten für Antworten vorzuschlagen.</string>
     <key>NSAppleEventsUsageDescription</key>

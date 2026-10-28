@@ -312,6 +312,8 @@ struct MessageRow: View {
                 Spacer()
                 Label("\(message.account) / \(message.mailbox)", systemImage: "folder")
                     .font(.caption2).foregroundStyle(CTW.muted).lineLimit(1)
+                PlanMenu(subject: message.subject, sender: message.senderName, date: message.date, messageId: message.messageId,
+                         ownClient: engine.isClientAccount(message.account))
                 if message.mailURL != nil {
                     Button { engine.openMessage(messageId: message.messageId) } label: { Image(systemName: "envelope.open.fill") }
                         .buttonStyle(.borderless)

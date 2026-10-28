@@ -187,6 +187,15 @@ Nennt eine Mail eine Frist, trägt Claude sie ins Gespräch ein. Du kannst Frist
 - **Von Hand:** Im Menü des Fristfelds *In Erinnerungen eintragen* bzw. *In Kalender eintragen*.
 - Für Termine musst du unter *Einstellungen → Fristen* einen Kalender wählen, sonst werden keine angelegt.
 
+### Kalender und Erinnerungen
+
+Die Seitenleistenpunkte **Kalender** und **Erinnerungen** zeigen und bearbeiten deine Einträge aus den macOS-Apps Kalender und Erinnerungen (alle dort eingerichteten Konten, auch iCloud). Beim ersten Öffnen fragt macOS nach der Freigabe; ohne sie bleiben beide Ansichten leer.
+
+- **Kalender:** Wochen- und Monatsansicht, Pfeile und *Heute* zum Blättern. Klick auf einen Termin bearbeitet oder löscht ihn (bei Serien nur diesen Termin), Doppelklick auf einen Tag oder *Neuer Termin* legt einen an. Über *Kalender* blendest du einzelne Kalender aus.
+- **Erinnerungen:** gruppiert nach Überfällig, Heute, Demnächst, Ohne Datum (Erledigte auf Wunsch). Haken setzen erledigt; Stift bearbeitet. Das Eingabefeld versteht Deutsch: „Steuerberater anrufen morgen 14 Uhr“, „Miete überweisen am 3.11.“, „Bericht in 2 Wochen“, „Zahnarzt Freitag 9:30“. Das erkannte Datum siehst du vor dem Anlegen. Die Zahl an *Erinnerungen* in der Seitenleiste sind die überfälligen.
+- **Aus einer Mail:** Das Symbol 📅 an einer Mail (Postfach und Gesprächsansicht) legt eine Erinnerung oder einen Termin an – Titel, Absender und Datum sind vorbelegt. Der Eintrag enthält einen Verweis; in Kalender und Erinnerungen öffnet er die Mail wieder (eigene Postfach-Konten über `mailpilot://`, Apple Mail über `message://`).
+- Die automatische Fristen-Übernahme und die Einladungen (siehe oben und Kapitel 5) schreiben in dieselben Kalender und Listen.
+
 ### Mitteilungen
 
 MailPilot meldet sich bei VIP-Mails, wichtigen Mails mit Antwortbedarf, überfälligen Follow-ups, fertigen Nachfass-Entwürfen, abgelaufenen Zurückstellungen und wenn das Briefing bereit ist. Mitteilungen zu einem Gespräch haben Knöpfe:
@@ -461,6 +470,8 @@ Im Menü **Gespräch** (bei geöffnetem Dashboard):
 | ⌘2 | Warte auf Antwort |
 | ⌘3 | Zurückgestellt |
 | ⌘4 | Rechnungen |
+| ⌘5 | Kalender |
+| ⌘6 | Erinnerungen |
 
 Die Aktionen wirken auf das gerade geöffnete Gespräch.
 

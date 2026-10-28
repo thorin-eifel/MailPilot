@@ -188,6 +188,7 @@ struct MailboxView: View {
                     .buttonStyle(.borderless).disabled(model.opened == nil).help("Allen antworten").accessibilityLabel("Allen antworten")
                 Button { startForward(m) } label: { Image(systemName: "arrowshape.turn.up.right") }
                     .buttonStyle(.borderless).disabled(model.opened == nil).help("Weiterleiten").accessibilityLabel("Weiterleiten")
+                PlanMenu(subject: m.subject, sender: m.senderDisplay, date: m.date, messageId: m.messageId, ownClient: true)
                 Button { Task { await model.setRead(m, !m.isRead) } } label: {
                     Image(systemName: m.isRead ? "envelope.badge" : "envelope.open")
                 }

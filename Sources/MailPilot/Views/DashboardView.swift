@@ -1,13 +1,15 @@
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
-    case mailbox, search, briefing, weekly, needsReply, waiting, snoozed, all, invoices, invites, newsletter, rules, usage, activity, settings
+    case mailbox, calendar, reminders, search, briefing, weekly, needsReply, waiting, snoozed, all, invoices, invites, newsletter, rules, usage, activity, settings
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
         case .mailbox: "Postfach"
+        case .calendar: "Kalender"
+        case .reminders: "Erinnerungen"
         case .search: "Suche"
         case .briefing: "Briefing"
         case .weekly: "Wochenbericht"
@@ -28,6 +30,8 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     var symbol: String {
         switch self {
         case .mailbox: "tray.2.fill"
+        case .calendar: "calendar"
+        case .reminders: "checklist"
         case .search: "magnifyingglass"
         case .briefing: "sun.horizon.fill"
         case .weekly: "chart.bar.doc.horizontal"
@@ -48,6 +52,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
 
 struct DashboardView: View {
     @EnvironmentObject var engine: Engine
+    @ObservedObject private var planner = Planner.shared
     @ViewState private var selection: SidebarItem?
 
     init(initial: SidebarItem = .needsReply) {
@@ -60,6 +65,8 @@ struct DashboardView: View {
             List(selection: $selection) {
                 Section {
                     row(.mailbox, count: nil)
+                    row(.calendar, count: nil)
+                    row(.reminders, count: planner.overdueCount)
                     row(.search, count: nil)
                     row(.briefing, count: nil)
                     row(.weekly, count: nil)
@@ -104,6 +111,8 @@ struct DashboardView: View {
                 CTW.bg.ignoresSafeArea()
                 switch selection ?? .needsReply {
                 case .mailbox: MailboxView()
+                case .calendar: CalendarView()
+                case .reminders: RemindersView()
                 case .search: SearchView()
                 case .briefing: BriefingView()
                 case .weekly: WeeklyView()
@@ -122,6 +131,11 @@ struct DashboardView: View {
             }
         }
         .tint(CTW.accent)
+        .sheet(item: $planner.draft) { PlannerDraftSheet(draft: $0) }
+        .onOpenURL { url in
+            if let id = PlannerDraft.messageId(fromLink: url) { engine.openMessage(messageId: id) }
+        }
+        .task { await planner.reload() }
         .onChange(of: engine.requestedSidebar) { _, new in
             if let new { selection = new; engine.requestedSidebar = nil }
         }

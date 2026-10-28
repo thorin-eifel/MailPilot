@@ -98,6 +98,8 @@ struct MailPilotApp: App {
                 Button("Warte auf Antwort") { engine.requestedSidebar = .waiting }.keyboardShortcut("2")
                 Button("Zurückgestellt") { engine.requestedSidebar = .snoozed }.keyboardShortcut("3")
                 Button("Rechnungen") { engine.requestedSidebar = .invoices }.keyboardShortcut("4")
+                Button("Kalender") { engine.requestedSidebar = .calendar }.keyboardShortcut("5")
+                Button("Erinnerungen") { engine.requestedSidebar = .reminders }.keyboardShortcut("6")
             }
         }
     }
@@ -187,6 +189,7 @@ enum RenderPreview {
             await engine.refreshAccounts()
             engine.reload()
             engine.loadPreviewSamples()
+            Planner.shared.loadPreviewSamples()
             let out = URL(fileURLWithPath: dir)
             try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
             let thread = engine.threads.first { $0.draft != nil } ?? engine.threads.first { $0.messageCount > 1 } ?? engine.threads.first
@@ -195,6 +198,8 @@ enum RenderPreview {
                 render(MenuBarView(), size: NSSize(width: 360, height: 420), dark: dark, to: out.appendingPathComponent("menubar-\(suffix).png"))
                 render(DashboardView(initial: .all), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("dashboard-\(suffix).png"))
                 render(DashboardView(initial: .mailbox), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("mailbox-\(suffix).png"))
+                render(DashboardView(initial: .calendar), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("calendar-\(suffix).png"))
+                render(DashboardView(initial: .reminders), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("reminders-\(suffix).png"))
                 render(DashboardView(initial: .briefing), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("briefing-\(suffix).png"))
                 render(DashboardView(initial: .rules), size: NSSize(width: 1240, height: 1500), dark: dark, to: out.appendingPathComponent("rules-\(suffix).png"))
                 render(DashboardView(initial: .invoices), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("invoices-\(suffix).png"))
