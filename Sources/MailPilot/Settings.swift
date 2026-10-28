@@ -36,6 +36,9 @@ struct AppSettings: Codable, Equatable {
     var followUpDays = 3
     var briefingHour = 8
     var folderPrefix = "Claude/"
+    /// Mails ohne eigenen Kategorie-Ordner, deren Gespräch erledigt/Info ist, werden ab diesem Alter archiviert (0 = nie).
+    var archiveAfterDays = 30
+    var archiveFolder = "Archiv"
     var customInstructions = ""
     var categories: [CategoryRule] = CategoryRule.defaults
 

@@ -11,7 +11,13 @@ struct MenuBarView: View {
                 Spacer()
                 if engine.isRunning { ProgressView().controlSize(.small) }
             }
-            Text(engine.status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            if let p = engine.initialProgress {
+                ProgressView(value: p.fraction)
+                Text("Erstscan: \(p.analyzed) von \(p.total) analysiert · \(p.moved) einsortiert")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text(engine.status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
             if let err = engine.lastError {
                 Text(err).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }

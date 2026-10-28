@@ -66,6 +66,17 @@ enum SelfTest {
                 } catch {
                     print("Claude-Fehler: \(error.localizedDescription)")
                 }
+                if CommandLine.arguments.contains("--batch") {
+                    do {
+                        let store = try Store()
+                        let msgs = Array(try store.unprocessedMessages(limit: 10))
+                        let start = Date()
+                        let r = try await client.classifyBatch(msgs, settings: s, myAddresses: [])
+                        print("Paket: \(r.count)/\(msgs.count) in \(Int(Date().timeIntervalSince(start))) s")
+                    } catch {
+                        print("Paket-Fehler: \(error.localizedDescription)")
+                    }
+                }
                 if CommandLine.arguments.contains("--analyze") {
                     await analyze(client: client, settings: s)
                 }

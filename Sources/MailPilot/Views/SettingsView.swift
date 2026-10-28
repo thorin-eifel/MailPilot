@@ -17,7 +17,10 @@ struct SettingsView: View {
                 Toggle("Gesendete Mails einbeziehen (für „Warte auf Antwort“)", isOn: $engine.settings.includeSent)
                 Toggle("Mitteilungen (wichtige Mails, Follow-ups, Briefing)", isOn: $engine.settings.notifications)
                 TextField("Ordner-Präfix", text: $engine.settings.folderPrefix)
-                Text("Ordner werden im jeweiligen Konto angelegt, z. B. „\(engine.settings.folderPrefix)Rechnungen“. Mails, die vor dem ersten Start eingegangen sind, werden nur analysiert, nicht verschoben.")
+                Stepper(engine.settings.archiveAfterDays == 0 ? "Erledigte Mails nicht archivieren" : "Erledigte Mails ohne Kategorie-Ordner nach \(engine.settings.archiveAfterDays) Tagen archivieren",
+                        value: $engine.settings.archiveAfterDays, in: 0...365, step: 5)
+                TextField("Archivordner", text: $engine.settings.archiveFolder)
+                Text("Ordner werden im jeweiligen Konto angelegt, z. B. „\(engine.settings.folderPrefix)Rechnungen“. Beim ersten Start wird der gesamte Posteingang katalogisiert und einsortiert; danach läuft der Zeitplan.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

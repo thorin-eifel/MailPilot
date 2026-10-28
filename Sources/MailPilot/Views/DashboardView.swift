@@ -84,6 +84,10 @@ struct DashboardView: View {
                 if engine.isRunning { ProgressView().controlSize(.mini) }
                 Text(engine.status).lineLimit(2)
             }
+            if let p = engine.initialProgress {
+                ProgressView(value: p.fraction)
+                Text("\(Int(p.fraction * 100)) % · \(p.moved) einsortiert").foregroundStyle(.secondary)
+            }
             if let err = engine.lastError {
                 Text(err).foregroundStyle(.red).lineLimit(4)
             }

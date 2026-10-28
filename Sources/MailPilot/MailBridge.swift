@@ -24,17 +24,22 @@ enum BridgeError: LocalizedError {
 final class MailBridge: @unchecked Sendable {
     private let fetchScript: URL
     private let actionScript: URL
+    private let batchScript: URL
 
     init() {
         fetchScript = Paths.scripts.appendingPathComponent("fetch.js")
         actionScript = Paths.scripts.appendingPathComponent("action.js")
+        batchScript = Paths.scripts.appendingPathComponent("batch.js")
         try? Self.fetchJS.write(to: fetchScript, atomically: true, encoding: .utf8)
         try? Self.actionJS.write(to: actionScript, atomically: true, encoding: .utf8)
+        try? Self.batchJS.write(to: batchScript, atomically: true, encoding: .utf8)
     }
 
-    func fetch(since: Date, known: [String], maxNew: Int, includeSent: Bool, contentLimit: Int = 6000) async throws -> FetchResult {
+    func fetch(since: Date, sentSince: Date? = nil, known: [String], maxNew: Int, includeSent: Bool,
+               contentLimit: Int = 6000) async throws -> FetchResult {
         let params: [String: Any] = [
             "since": since.isoString,
+            "sentSince": (sentSince ?? since).isoString,
             "known": known,
             "maxNew": maxNew,
             "includeSent": includeSent,
@@ -66,6 +71,32 @@ final class MailBridge: @unchecked Sendable {
         _ = try await perform(["action": "reply", "text": text, "replyAll": replyAll], messageId: messageId, loc: loc)
     }
 
+    struct BatchItem {
+        var messageId: String
+        var location: Location
+        var target: String?
+        var flag: FlagColor?
+    }
+
+    struct BatchResult: Decodable {
+        var messageId: String
+        var ok: Bool
+        var error: String?
+    }
+
+    /// Markiert und verschiebt viele Nachrichten in einem einzigen osascript-Aufruf.
+    func batch(_ items: [BatchItem]) async throws -> [BatchResult] {
+        let list: [[String: Any]] = items.map { it in
+            var d: [String: Any] = ["messageId": it.messageId, "account": it.location.account,
+                                    "mailbox": it.location.mailbox, "id": it.location.mailId]
+            if let t = it.target { d["target"] = t }
+            if let f = it.flag { d["flagIndex"] = f.rawValue }
+            return d
+        }
+        let out = try await run(batchScript, ["items": list])
+        return try JSONDecoder().decode([BatchResult].self, from: Data(out.utf8))
+    }
+
     private func perform(_ extra: [String: Any], messageId: String, loc: Location) async throws -> [String: Any] {
         var params = extra
         params["messageId"] = messageId
@@ -77,11 +108,14 @@ final class MailBridge: @unchecked Sendable {
     }
 
     private func run(_ script: URL, _ params: [String: Any]) async throws -> String {
-        let json = String(data: try JSONSerialization.data(withJSONObject: params), encoding: .utf8)!
+        // Parameter über eine Datei übergeben – die Liste bekannter IDs sprengt sonst die Argumentlänge.
+        let paramFile = FileManager.default.temporaryDirectory.appendingPathComponent("mailpilot-\(UUID().uuidString).json")
+        try JSONSerialization.data(withJSONObject: params).write(to: paramFile)
+        defer { try? FileManager.default.removeItem(at: paramFile) }
         let result = try await ProcessRunner.run(
             executable: "/usr/bin/osascript",
-            arguments: ["-l", "JavaScript", script.path, json],
-            timeout: 600
+            arguments: ["-l", "JavaScript", script.path, paramFile.path],
+            timeout: 1800
         )
         guard result.status == 0 else {
             throw BridgeError.script(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -93,9 +127,11 @@ final class MailBridge: @unchecked Sendable {
 
     private static let fetchJS = #"""
     function run(argv) {
-      const p = JSON.parse(argv[0]);
+      ObjC.import('Foundation');
+      const p = JSON.parse($.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null).js);
       const Mail = Application('Mail');
       const since = new Date(p.since);
+      const sentSince = new Date(p.sentSince);
       const known = {};
       p.known.forEach(k => { known[k] = true; });
       const out = { messages: [], myAddresses: [], remaining: 0 };
@@ -115,11 +151,9 @@ final class MailBridge: @unchecked Sendable {
       }
 
       function collect(coll, isSent) {
-        let ids, dates;
-        try {
-          ids = coll.messageId();
-          dates = isSent ? coll.dateSent() : coll.dateReceived();
-        } catch (e) { return; }
+        // Fehler hier nicht verschlucken – sonst sähe ein Timeout wie „keine neuen Mails“ aus.
+        const ids = coll.messageId();
+        const dates = isSent ? coll.dateSent() : coll.dateReceived();
         // Älteste zuerst, damit Gesprächsverläufe in der richtigen Reihenfolge entstehen.
         const order = ids.map((_, i) => i).sort((a, b) => dates[a] - dates[b]);
         for (const i of order) {
@@ -129,6 +163,8 @@ final class MailBridge: @unchecked Sendable {
           known[mid] = true;
           try {
             const m = coll[i];
+            // Der Posteingang kann sich seit der Massenabfrage verändert haben (neue/verschobene Mails).
+            if (m.messageId() !== mid) { delete known[mid]; out.remaining++; continue; }
             const mb = m.mailbox();
             let account = '';
             try { account = mb.account().name(); } catch (e) {}
@@ -155,20 +191,85 @@ final class MailBridge: @unchecked Sendable {
         }
       }
 
-      collect(Mail.inbox.messages.whose({ dateReceived: { _greaterThan: since } }), false);
-      if (p.includeSent) collect(Mail.sentMailbox.messages.whose({ dateSent: { _greaterThan: since } }), true);
+      // Beim Vollscan ohne Datumsfilter lesen: „whose“ über Tausende Mails läuft in einen AppleEvent-Timeout.
+      const fullScan = since.getFullYear() < 1980;
+      collect(fullScan ? Mail.inbox.messages : Mail.inbox.messages.whose({ dateReceived: { _greaterThan: since } }), false);
+      if (p.includeSent) collect(Mail.sentMailbox.messages.whose({ dateSent: { _greaterThan: sentSince } }), true);
       return JSON.stringify(out);
+    }
+    """#
+
+    private static let batchJS = #"""
+    function run(argv) {
+      ObjC.import('Foundation');
+      const p = JSON.parse($.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null).js);
+      const Mail = Application('Mail');
+      const boxes = {};
+
+      // Exchange führt Unterordner unter dem Elternordner, teils mit vollem Pfad als Name.
+      function lookup(acct, name) {
+        const mb = acct.mailboxes.byName(name);
+        if (mb.exists()) return mb;
+        const parts = name.split('/');
+        if (parts.length > 1) {
+          const parent = acct.mailboxes.byName(parts[0]);
+          if (parent.exists()) {
+            for (const cand of [name, parts.slice(1).join('/')]) {
+              const c = parent.mailboxes.byName(cand);
+              if (c.exists()) return c;
+            }
+          }
+        }
+        return null;
+      }
+
+      function ensureMailbox(acct, accountName, name) {
+        const key = accountName + '\u0000' + name;
+        if (boxes[key]) return boxes[key];
+        let mb = lookup(acct, name);
+        if (!mb) {
+          try { acct.mailboxes.push(Mail.Mailbox({ name: name })); } catch (e) {}
+          for (let i = 0; i < 20 && !mb; i++) { delay(0.25); mb = lookup(acct, name); }
+          if (!mb) throw new Error('Ordner konnte nicht angelegt werden: ' + name);
+        }
+        boxes[key] = mb;
+        return mb;
+      }
+
+      function find(acct, it) {
+        const mb = lookup(acct, it.mailbox) || acct.mailboxes.byName(it.mailbox);
+        if (it.id) {
+          try { const m = mb.messages.byId(it.id); if (m.messageId() === it.messageId) return m; } catch (e) {}
+        }
+        const r = mb.messages.whose({ messageId: it.messageId });
+        if (r.length > 0) return r[0];
+        throw new Error('Nachricht nicht gefunden');
+      }
+
+      const results = [];
+      for (const it of p.items) {
+        const r = { messageId: it.messageId, ok: true };
+        try {
+          const acct = Mail.accounts.byName(it.account);
+          const m = find(acct, it);
+          if (it.flagIndex !== undefined) { m.flaggedStatus = true; m.flagIndex = it.flagIndex; }
+          if (it.target) Mail.move(m, { to: ensureMailbox(acct, it.account, it.target) });
+        } catch (e) { r.ok = false; r.error = String(e); }
+        results.push(r);
+      }
+      return JSON.stringify(results);
     }
     """#
 
     private static let actionJS = #"""
     function run(argv) {
-      const p = JSON.parse(argv[0]);
+      ObjC.import('Foundation');
+      const p = JSON.parse($.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null).js);
       const Mail = Application('Mail');
       const acct = Mail.accounts.byName(p.account);
 
       function find() {
-        const mb = acct.mailboxes.byName(p.mailbox);
+        const mb = lookup(acct, p.mailbox) || acct.mailboxes.byName(p.mailbox);
         try { const m = mb.messages.byId(p.id); if (m.messageId() === p.messageId) return m; } catch (e) {}
         try { const r = mb.messages.whose({ messageId: p.messageId }); if (r.length > 0) return r[0]; } catch (e) {}
         const r2 = Mail.inbox.messages.whose({ messageId: p.messageId });
@@ -176,12 +277,29 @@ final class MailBridge: @unchecked Sendable {
         throw new Error('Nachricht nicht gefunden: ' + p.messageId);
       }
 
-      function ensureMailbox(name) {
-        let mb = acct.mailboxes.byName(name);
+      // Exchange führt Unterordner unter dem Elternordner, teils mit vollem Pfad als Name.
+      function lookup(acct, name) {
+        const mb = acct.mailboxes.byName(name);
         if (mb.exists()) return mb;
-        acct.mailboxes.push(Mail.Mailbox({ name: name }));
-        for (let i = 0; i < 20 && !mb.exists(); i++) delay(0.25);
-        if (!mb.exists()) throw new Error('Ordner konnte nicht angelegt werden: ' + name);
+        const parts = name.split('/');
+        if (parts.length > 1) {
+          const parent = acct.mailboxes.byName(parts[0]);
+          if (parent.exists()) {
+            for (const cand of [name, parts.slice(1).join('/')]) {
+              const c = parent.mailboxes.byName(cand);
+              if (c.exists()) return c;
+            }
+          }
+        }
+        return null;
+      }
+
+      function ensureMailbox(name) {
+        let mb = lookup(acct, name);
+        if (mb) return mb;
+        try { acct.mailboxes.push(Mail.Mailbox({ name: name })); } catch (e) {}
+        for (let i = 0; i < 20 && !mb; i++) { delay(0.25); mb = lookup(acct, name); }
+        if (!mb) throw new Error('Ordner konnte nicht angelegt werden: ' + name);
         return mb;
       }
 

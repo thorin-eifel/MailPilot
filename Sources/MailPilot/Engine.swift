@@ -3,9 +3,19 @@ import SwiftUI
 import UserNotifications
 
 /// Steuert den Abruf, die Analyse durch Claude und die automatischen Aktionen in Mail.
+///
+/// Ablauf: Beim ersten Start wird der komplette Posteingang katalogisiert und einsortiert (Erstscan).
+/// Erst wenn der durch ist, übernimmt der Scheduler mit regelmäßigen Durchläufen.
 @MainActor
 final class Engine: ObservableObject {
     static let shared = Engine()
+
+    struct InitialProgress {
+        var total: Int
+        var analyzed: Int
+        var moved: Int
+        var fraction: Double { total > 0 ? min(1, Double(analyzed) / Double(total)) : 0 }
+    }
 
     @Published var settings: AppSettings { didSet { settings.save(to: Paths.settings); if oldValue.pollMinutes != settings.pollMinutes { schedule() } } }
     @Published private(set) var threads: [MailThread] = []
@@ -16,25 +26,27 @@ final class Engine: ObservableObject {
     @Published private(set) var status = "Bereit"
     @Published private(set) var lastRun: Date?
     @Published private(set) var lastError: String?
+    @Published private(set) var initialProgress: InitialProgress?
     @Published var paused = false { didSet { schedule() } }
 
     let store: Store
     let bridge = MailBridge()
     private var loop: Task<Void, Never>?
-
-    /// Mails, die vor dem ersten Start eingegangen sind, werden analysiert, aber nicht verschoben.
-    private(set) var installDate: Date
     private var myAddresses: [String]
+    /// Abbruchgrund innerhalb paralleler Analysen (z. B. Claude nicht angemeldet oder Limit erreicht).
+    private var abortError: Error?
+
+    private(set) var initialComplete: Bool {
+        didSet { store.setValue(initialComplete ? "1" : nil, for: "initialComplete") }
+    }
+
+    /// Mails jünger als diese Grenze werden einzeln mit Verlauf und Entwurf analysiert, ältere im Paket.
+    private let detailedDays = 14.0
 
     private init() {
         do { store = try Store() } catch { fatalError("Datenbank: \(error)") }
         settings = AppSettings.load(from: Paths.settings)
-        if let s = store.value("installDate"), let t = Double(s) {
-            installDate = Date(timeIntervalSince1970: t)
-        } else {
-            installDate = Date()
-            store.setValue(String(installDate.timeIntervalSince1970), for: "installDate")
-        }
+        initialComplete = store.value("initialComplete") == "1"
         myAddresses = (store.value("myAddresses") ?? "").split(separator: ",").map(String.init)
         reload()
     }
@@ -59,7 +71,7 @@ final class Engine: ObservableObject {
         briefing = try? store.latestBriefing()
     }
 
-    // MARK: Zeitplan
+    // MARK: Start & Zeitplan
 
     private var started = false
 
@@ -67,11 +79,16 @@ final class Engine: ObservableObject {
         guard !started else { return }
         started = true
         requestNotificationPermission()
-        schedule()
+        if initialComplete {
+            schedule()
+        } else {
+            Task { await runInitialScan() }
+        }
     }
 
     private func schedule() {
         loop?.cancel()
+        guard initialComplete else { return }
         guard !paused else { status = "Pausiert"; return }
         loop = Task { [weak self] in
             while !Task.isCancelled {
@@ -82,9 +99,77 @@ final class Engine: ObservableObject {
         }
     }
 
-    // MARK: Zyklus
+    // MARK: Erstscan
+
+    /// Katalogisiert den gesamten Posteingang und sortiert ihn ein. Wird bei Abbruch beim nächsten Start fortgesetzt.
+    func runInitialScan() async {
+        guard !initialComplete, !isRunning else { return }
+        isRunning = true
+        defer { isRunning = false; lastRun = Date(); reload() }
+
+        while !initialComplete {
+            do {
+                guard let claude else { throw ClaudeError.notFound }
+                lastError = nil
+                try await initialPass(claude: claude)
+                status = "Erstscan: erstelle Briefing …"
+                try? await generateBriefing(claude: claude)
+                initialComplete = true
+                initialProgress = nil
+                status = "Erstscan abgeschlossen"
+                notify(title: "MailPilot: Erstscan abgeschlossen",
+                       body: "\(store.progressCounts().analyzed) Mails katalogisiert, \(store.progressCounts().moved) einsortiert.", id: "initial")
+            } catch {
+                lastError = error.localizedDescription
+                status = "Erstscan unterbrochen – neuer Versuch in 5 Minuten"
+                try? await Task.sleep(for: .seconds(300))
+            }
+        }
+        schedule()
+    }
+
+    private func initialPass(claude: ClaudeClient) async throws {
+        var next: FetchResult? = try await fetchInitial()
+        var emptyRounds = 0
+        while let result = next {
+            if result.messages.isEmpty {
+                emptyRounds += 1
+                if result.remaining == 0 || emptyRounds > 3 { break }
+            } else {
+                emptyRounds = 0
+            }
+            try ingest(result)
+            updateProgress(remaining: result.remaining)
+
+            // Nächsten Block schon lesen, während Claude den aktuellen analysiert.
+            let prefetch: Task<FetchResult, Error>? = result.remaining > 0 ? Task { try await self.fetchInitial() } : nil
+            try await analyzePending(claude: claude)
+            next = try await prefetch?.value
+            try await applyPendingActions(initial: true)
+            updateProgress(remaining: next?.remaining ?? 0)
+        }
+        // Reste (z. B. fehlgeschlagene Analysen aus früheren Versuchen) abarbeiten.
+        try await analyzePending(claude: claude)
+        try await applyPendingActions(initial: true)
+    }
+
+    private func fetchInitial() async throws -> FetchResult {
+        let known = try store.knownMessageIds(since: .distantPast)
+        let sentSince = Date().addingTimeInterval(-Double(max(settings.lookbackDays, 30)) * 86400)
+        return try await bridge.fetch(since: Date(timeIntervalSince1970: 0), sentSince: sentSince, known: known,
+                                      maxNew: 150, includeSent: settings.includeSent, contentLimit: 3000)
+    }
+
+    private func updateProgress(remaining: Int) {
+        let c = store.progressCounts()
+        initialProgress = InitialProgress(total: c.total + remaining, analyzed: c.analyzed, moved: c.moved)
+        status = "Erstscan: \(c.analyzed) von \(c.total + remaining) analysiert, \(c.moved) einsortiert"
+    }
+
+    // MARK: Regulärer Durchlauf
 
     func runCycle() async {
+        guard initialComplete else { return }
         guard !isRunning else { return }
         guard let claude else { lastError = ClaudeError.notFound.localizedDescription; return }
         isRunning = true
@@ -97,28 +182,9 @@ final class Engine: ObservableObject {
             let known = try store.knownMessageIds(since: since.addingTimeInterval(-86400))
             let result = try await bridge.fetch(since: since, known: known, maxNew: settings.maxPerCycle,
                                                 includeSent: settings.includeSent)
-            if !result.myAddresses.isEmpty {
-                myAddresses = Array(Set(result.myAddresses)).sorted()
-                store.setValue(myAddresses.joined(separator: ","), for: "myAddresses")
-            }
-            let mine = Set(myAddresses)
-            for raw in result.messages { try store.insert(raw, myAddresses: mine) }
-
-            let pending = try store.unprocessedMessages(limit: settings.maxPerCycle)
-            for (i, m) in pending.enumerated() {
-                status = "Analysiere \(i + 1)/\(pending.count): \(m.subject.prefix(40))"
-                do {
-                    try await process(m, claude: claude)
-                } catch let e as ClaudeError {
-                    // Login- oder CLI-Probleme betreffen alle Nachrichten – Zyklus abbrechen.
-                    try? store.markFailed(m.messageId, error: e.localizedDescription, giveUp: false)
-                    throw e
-                } catch {
-                    try? store.markFailed(m.messageId, error: error.localizedDescription, giveUp: true)
-                }
-                threads = (try? store.threads()) ?? threads
-            }
-
+            try ingest(result)
+            try await analyzePending(claude: claude)
+            try await applyPendingActions(initial: false)
             checkFollowUps()
             try await briefingIfDue(claude: claude)
             status = result.remaining > 0 ? "\(result.remaining) weitere Mails im nächsten Durchlauf" : "Aktuell"
@@ -128,16 +194,104 @@ final class Engine: ObservableObject {
         }
     }
 
-    private func process(_ m: StoredMessage, claude: ClaudeClient) async throws {
-        let key = try store.resolveThreadKey(for: m)
-        let existing = try store.thread(key)
-        let history = try store.messages(inThread: key, limit: 6)
-        let a = try await claude.analyze(message: m, thread: existing, history: history,
-                                         settings: settings, myAddresses: myAddresses)
+    private func ingest(_ result: FetchResult) throws {
+        if !result.myAddresses.isEmpty {
+            myAddresses = Array(Set(result.myAddresses)).sorted()
+            store.setValue(myAddresses.joined(separator: ","), for: "myAddresses")
+        }
+        let mine = Set(myAddresses)
+        for raw in result.messages { try store.insert(raw, myAddresses: mine) }
+    }
 
+    // MARK: Analyse
+
+    /// Analysiert alle noch offenen Nachrichten: neuere einzeln (mit Verlauf und Entwurf), ältere in Paketen.
+    private func analyzePending(claude: ClaudeClient) async throws {
+        let pending = try store.unprocessedMessages(limit: 100_000)
+        guard !pending.isEmpty else { return }
+        abortError = nil
+
+        // Gesprächszuordnung nacheinander, damit Antworten im selben Block ihr Gespräch finden.
+        var keyed: [(StoredMessage, String)] = []
+        for m in pending {
+            let key = try store.resolveThreadKey(for: m)
+            try store.setThreadKey(key, for: m.messageId)
+            keyed.append((m, key))
+        }
+
+        let cutoff = Date().addingTimeInterval(-detailedDays * 86400)
+        let old = keyed.filter { $0.0.date < cutoff }
+        let recent = keyed.filter { $0.0.date >= cutoff }
+
+        let chunks = stride(from: 0, to: old.count, by: 10).map { Array(old[$0..<min($0 + 10, old.count)]) }
+        await runConcurrently(chunks, limit: 3) { chunk in
+            await self.analyzeChunk(chunk, claude: claude)
+        }
+        if let abortError { throw abortError }
+
+        // Pro Gespräch nacheinander, verschiedene Gespräche parallel.
+        var groups: [String: [(StoredMessage, String)]] = [:]
+        var order: [String] = []
+        for item in recent {
+            if groups[item.1] == nil { order.append(item.1) }
+            groups[item.1, default: []].append(item)
+        }
+        await runConcurrently(order.map { groups[$0]! }, limit: 3) { group in
+            for (m, key) in group where self.abortError == nil {
+                await self.analyzeSingle(m, key: key, claude: claude)
+            }
+        }
+        if let abortError { throw abortError }
+    }
+
+    private func analyzeChunk(_ chunk: [(StoredMessage, String)], claude: ClaudeClient) async {
+        guard abortError == nil else { return }
+        do {
+            let results = try await claude.classifyBatch(chunk.map(\.0), settings: settings, myAddresses: myAddresses)
+            for (i, (m, key)) in chunk.enumerated() {
+                if let a = results[i] {
+                    try record(m, key: key, analysis: a)
+                } else {
+                    try store.markFailed(m.messageId, error: "Keine Analyse erhalten", giveUp: true)
+                }
+            }
+        } catch {
+            handle(error, for: chunk.map(\.0))
+        }
+        if initialProgress != nil { updateProgress(remaining: initialProgress.map { $0.total - store.progressCounts().total } ?? 0) }
+    }
+
+    private func analyzeSingle(_ m: StoredMessage, key: String, claude: ClaudeClient) async {
+        guard abortError == nil else { return }
+        do {
+            let existing = try store.thread(key)
+            let history = try store.messages(inThread: key, limit: 6)
+            let a = try await claude.analyze(message: m, thread: existing, history: history,
+                                             settings: settings, myAddresses: myAddresses)
+            try record(m, key: key, analysis: a)
+        } catch {
+            handle(error, for: [m])
+        }
+        if initialProgress != nil { updateProgress(remaining: initialProgress.map { $0.total - store.progressCounts().total } ?? 0) }
+        threads = (try? store.threads()) ?? threads
+    }
+
+    private func handle(_ error: Error, for messages: [StoredMessage]) {
+        if let e = error as? ClaudeError, e.isBlocking {
+            // Login-, Limit- oder CLI-Probleme betreffen alle Nachrichten – später erneut versuchen.
+            for m in messages { try? store.markFailed(m.messageId, error: error.localizedDescription, giveUp: false) }
+            abortError = abortError ?? error
+        } else {
+            for m in messages { try? store.markFailed(m.messageId, error: error.localizedDescription, giveUp: true) }
+        }
+    }
+
+    /// Speichert das Analyse-Ergebnis an der Nachricht und aktualisiert das Gespräch.
+    private func record(_ m: StoredMessage, key: String, analysis a: MessageAnalysis) throws {
         try store.saveAnalysis(of: m.messageId, threadKey: key, category: m.isFromMe ? nil : a.category,
                                priority: a.priority, summary: a.summary)
 
+        let existing = try store.thread(key)
         let isLatest = existing.map { m.date >= $0.lastDate } ?? true
         let counterpart = m.isFromMe ? (m.recipients.first.map { MailAddress.parse($0).name ?? MailAddress.parse($0).email } ?? "") : m.senderName
         var t = existing ?? MailThread(
@@ -146,7 +300,7 @@ final class Engine: ObservableObject {
             status: a.thread_status, summary: "", nextStep: "", dueDate: nil, priority: a.priority,
             category: nil, draft: nil, draftFor: nil, followupNotified: false)
         t.messageCount += 1
-        t.summary = a.thread_summary
+        if isLatest || t.summary.isEmpty { t.summary = a.thread_summary }
         if isLatest {
             t.subject = m.subject
             t.lastDate = m.date
@@ -168,39 +322,94 @@ final class Engine: ObservableObject {
         if !m.isFromMe { t.category = a.category }
         try store.upsert(t)
 
-        if !m.isFromMe {
-            if m.date >= installDate {
-                try await applyActions(to: m, analysis: a)
-            }
-            if a.priority == .high && a.needs_reply && m.date >= installDate {
-                notify(title: "Wichtig: \(m.senderName)", body: "\(m.subject)\n\(a.summary)", id: m.messageId)
-            }
+        let fresh = m.date > Date().addingTimeInterval(-Double(settings.lookbackDays) * 86400)
+        if initialComplete, fresh, !m.isFromMe, a.priority == .high, a.needs_reply {
+            notify(title: "Wichtig: \(m.senderName)", body: "\(m.subject)\n\(a.summary)", id: m.messageId)
         }
     }
 
-    private func applyActions(to m: StoredMessage, analysis a: MessageAnalysis) async throws {
-        let rule = settings.category(named: a.category)
-        var loc = MailBridge.Location(account: m.account, mailbox: m.mailbox, mailId: m.mailId)
-        let dry = settings.dryRun
+    // MARK: Aktionen in Mail
 
-        if settings.autoFlag, let color = a.priority == .high ? FlagColor.red : rule?.flag {
-            if dry {
-                store.log(m, kind: "flag", detail: "Würde \(color.label) markieren (\(a.category))", dryRun: true)
-            } else {
-                try await bridge.flag(messageId: m.messageId, at: loc, color: color)
-                store.log(m, kind: "flag", detail: "\(color.label) markiert (\(a.category))", dryRun: false)
+    /// Wendet Ordner und Flaggen auf alle analysierten, noch nicht bearbeiteten Mails an – stapelweise.
+    private func applyPendingActions(initial: Bool) async throws {
+        let flagCutoff = Date().addingTimeInterval(-detailedDays * 86400)
+        let archiveCutoff = Date().addingTimeInterval(-Double(settings.archiveAfterDays) * 86400)
+
+        while true {
+            let pending = try store.pendingActions(limit: 50)
+            if pending.isEmpty { return }
+            var items: [MailBridge.BatchItem] = []
+            var byId: [String: StoredMessage] = [:]
+
+            for m in pending {
+                let rule = settings.category(named: m.category)
+                // Gmail meldet Posteingangsmails im Ordner „Alle Nachrichten“; Verschieben würde dort nur Labels ändern.
+                let isGmailAllMail = ["alle nachrichten", "all mail", "[gmail]/alle nachrichten", "[gmail]/all mail"].contains(m.mailbox.lowercased())
+
+                var target: String?
+                if settings.autoMove, !isGmailAllMail, !m.account.isEmpty {
+                    if let rule, let folder = settings.folderPath(for: rule) {
+                        target = folder
+                    } else if settings.archiveAfterDays > 0, m.date < archiveCutoff, !settings.archiveFolder.isEmpty,
+                              let key = m.threadKey, let t = try store.thread(key), t.status == .info || t.status == .done {
+                        target = settings.folderPrefix + settings.archiveFolder
+                    }
+                    if target == m.mailbox { target = nil }
+                }
+
+                // Beim Erstscan nur aktuelle Mails markieren, sonst würden hunderte alte Flaggen entstehen.
+                var flag: FlagColor?
+                if settings.autoFlag, !initial || m.date >= flagCutoff {
+                    flag = m.priority == .high ? .red : rule?.flag
+                }
+
+                if target == nil && flag == nil {
+                    try store.markActioned(m.messageId)
+                    continue
+                }
+                if settings.dryRun {
+                    if let flag { store.log(m, kind: "flag", detail: "Würde \(flag.label) markieren (\(m.category ?? ""))", dryRun: true) }
+                    if let target { store.log(m, kind: "move", detail: "Würde nach „\(target)“ verschieben", from: m.mailbox, to: target, dryRun: true) }
+                    try store.markActioned(m.messageId)
+                    continue
+                }
+                items.append(.init(messageId: m.messageId,
+                                   location: .init(account: m.account, mailbox: m.mailbox, mailId: m.mailId),
+                                   target: target, flag: flag))
+                byId[m.messageId] = m
             }
-        }
 
-        // Gmail meldet Posteingangsmails im Ordner „Alle Nachrichten“; Verschieben würde dort nur Labels ändern.
-        let isGmailAllMail = ["alle nachrichten", "all mail", "[gmail]/alle nachrichten", "[gmail]/all mail"].contains(m.mailbox.lowercased())
-        if settings.autoMove, !isGmailAllMail, !m.account.isEmpty, let rule, let folder = settings.folderPath(for: rule), folder != m.mailbox {
-            if dry {
-                store.log(m, kind: "move", detail: "Würde nach „\(folder)“ verschieben", from: m.mailbox, to: folder, dryRun: true)
-            } else {
-                loc = try await bridge.move(messageId: m.messageId, from: loc, to: folder)
-                try store.updateLocation(m.messageId, mailbox: loc.mailbox, mailId: loc.mailId)
-                store.log(m, kind: "move", detail: "Nach „\(folder)“ verschoben", from: m.mailbox, to: folder, dryRun: false)
+            guard !items.isEmpty else { continue }
+            if initial { status = "Erstscan: sortiere \(items.count) Mails ein …" }
+            let results = try await bridge.batch(items)
+            for (item, r) in zip(items, results) {
+                guard let m = byId[item.messageId] else { continue }
+                if r.ok {
+                    if let flag = item.flag {
+                        store.log(m, kind: "flag", detail: "\(flag.label) markiert (\(m.category ?? ""))", dryRun: false)
+                    }
+                    if let target = item.target {
+                        try store.updateLocation(m.messageId, mailbox: target, mailId: 0)
+                        store.log(m, kind: "move", detail: "Nach „\(target)“ verschoben", from: m.mailbox, to: target, dryRun: false)
+                    }
+                } else {
+                    store.log(m, kind: "error", detail: "Fehlgeschlagen: \(r.error ?? "unbekannt")", dryRun: false)
+                }
+                try store.markActioned(m.messageId)
+            }
+            activity = (try? store.activity()) ?? activity
+        }
+    }
+
+    private func runConcurrently<T>(_ items: [T], limit: Int, _ body: @escaping @MainActor (T) async -> Void) async {
+        await withTaskGroup(of: Void.self) { group in
+            var it = items.makeIterator()
+            for _ in 0..<limit {
+                guard let x = it.next() else { break }
+                group.addTask { await body(x) }
+            }
+            while await group.next() != nil {
+                if let x = it.next() { group.addTask { await body(x) } }
             }
         }
     }

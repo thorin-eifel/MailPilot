@@ -99,6 +99,8 @@ final class Store: @unchecked Sendable {
         """)
         try db.exec("CREATE INDEX IF NOT EXISTS idx_msg_thread ON messages(thread_key)")
         try db.exec("CREATE INDEX IF NOT EXISTS idx_msg_date ON messages(date)")
+        // Spalte nachrüsten: 1 = Ordner/Flagge wurden angewendet (oder bewusst übersprungen).
+        try? db.exec("ALTER TABLE messages ADD COLUMN actioned INTEGER DEFAULT 0")
         try db.exec("""
         CREATE TABLE IF NOT EXISTS threads (
             thread_key TEXT PRIMARY KEY, subject TEXT, norm_subject TEXT, counterpart TEXT,
@@ -160,6 +162,28 @@ final class Store: @unchecked Sendable {
     func saveAnalysis(of messageId: String, threadKey: String, category: String?, priority: Priority?, summary: String?) throws {
         try db.exec("UPDATE messages SET thread_key = ?, category = ?, priority = ?, summary = ?, processed = 1, error = NULL WHERE message_id = ?",
                     [threadKey, category, priority?.rawValue, summary, messageId])
+    }
+
+    func setThreadKey(_ key: String, for messageId: String) throws {
+        try db.exec("UPDATE messages SET thread_key = ? WHERE message_id = ?", [key, messageId])
+    }
+
+    /// Analysierte eingegangene Mails, auf die noch keine Aktion angewendet wurde.
+    func pendingActions(limit: Int) throws -> [StoredMessage] {
+        try db.query("""
+            SELECT * FROM messages WHERE processed = 1 AND actioned = 0 AND is_from_me = 0 AND category IS NOT NULL
+            ORDER BY date ASC LIMIT ?
+            """, [limit]).map(message)
+    }
+
+    func markActioned(_ messageId: String) throws {
+        try db.exec("UPDATE messages SET actioned = 1 WHERE message_id = ?", [messageId])
+    }
+
+    func progressCounts() -> (total: Int, analyzed: Int, moved: Int) {
+        let r = (try? db.query("SELECT COUNT(*) AS t, SUM(processed != 0) AS a FROM messages"))?.first
+        let moved = (try? db.query("SELECT COUNT(*) AS n FROM activity WHERE kind = 'move' AND dry_run = 0 AND undone = 0"))?.first?.int("n") ?? 0
+        return (r?.int("t") ?? 0, r?.int("a") ?? 0, moved)
     }
 
     func markFailed(_ messageId: String, error: String, giveUp: Bool) throws {
