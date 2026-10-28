@@ -20,6 +20,7 @@ final class Engine: ObservableObject {
     @Published var settings: AppSettings {
         didSet {
             if persistSettings { settings.save(to: Paths.settings) }
+            UsageMonitor.shared.update(settings.usageGuard)
             if oldValue.pollMinutes != settings.pollMinutes { schedule() }
             if oldValue.enabledAccounts != settings.enabledAccounts { accountsChanged() }
         }
@@ -33,10 +34,16 @@ final class Engine: ObservableObject {
     /// Verfügbare Erinnerungslisten und Kalender (für die Auswahl der Fristen-Ziele).
     @Published var reminderLists: [String] = []
     @Published var calendars: [CalendarInfo] = []
+    @Published private(set) var weeklyReport: WeeklyReport?
+    @Published var weeklyBusy = false
     @Published private(set) var invoices: [Invoice] = []
     /// Noch nicht ausgelesene Mails der Rechnungs-Kategorie.
     @Published private(set) var invoiceQueue = 0
     @Published var invoiceBusy = false
+    @Published var styleBusy = false
+    @Published private(set) var planLimits: PlanLimits?
+    @Published private(set) var usageToday = UsageSummary()
+    @Published private(set) var usageBlock: String?
     @Published private(set) var suggestions: [RuleSuggestion] = []
     @Published private(set) var corrections: [Correction] = []
     @Published private(set) var briefing: Briefing?
@@ -70,11 +77,19 @@ final class Engine: ObservableObject {
         settings = AppSettings.load(from: Paths.settings)
         scannedAccounts = Set((store.value("scannedAccounts") ?? "").split(separator: "\n").map(String.init))
         myAddresses = (store.value("myAddresses") ?? "").split(separator: ",").map(String.init)
+        UsageMonitor.shared.configure(store: store)
+        UsageMonitor.shared.update(settings.usageGuard)
+        UsageMonitor.shared.onChange = { Task { @MainActor in Engine.shared.refreshUsage() } }
         reload()
     }
 
     var claude: ClaudeClient? {
         ClaudeClient.locate(preferred: settings.claudePath).map { ClaudeClient(executable: $0, model: settings.model) }
+    }
+
+    /// Für Aufrufe, die der Nutzer per Knopfdruck auslöst: läuft auch bei erreichter Pause-Grenze.
+    var claudeInteractive: ClaudeClient? {
+        claude.map { var c = $0; c.interactive = true; return c }
     }
 
     // MARK: Abgeleitete Werte
@@ -125,10 +140,18 @@ final class Engine: ObservableObject {
         (try? store.messages(inThread: thread.threadKey)) ?? []
     }
 
+    func refreshUsage() {
+        planLimits = UsageMonitor.shared.currentLimits
+        usageToday = store.usageSummary(since: Calendar.current.startOfDay(for: Date()))
+        usageBlock = UsageMonitor.shared.blockReason()
+    }
+
     func reload() {
+        refreshUsage()
         threads = (try? store.threads(accounts: enabledAccountNames)) ?? []
         activity = (try? store.activity()) ?? []
         suggestions = (try? store.openSuggestions()) ?? []
+        weeklyReport = store.latestReport()
         invoices = (try? store.invoices(accounts: enabledAccountNames)) ?? []
         invoiceQueue = settings.extractInvoices ? store.invoiceQueueCount(category: settings.invoiceCategory, accounts: enabledAccountNames) : 0
         moveStatus = Dictionary(uniqueKeysWithValues: accounts.compactMap { a in
@@ -180,6 +203,19 @@ final class Engine: ObservableObject {
                     paid: true, status: "ok", error: nil),
         ]
         invoiceQueue = 7
+        planLimits = PlanLimits(fiveHour: PlanWindow(utilization: 0.72, resetsAt: Date().addingTimeInterval(2 * 3600), status: "allowed"),
+                                sevenDay: PlanWindow(utilization: 0.69, resetsAt: Date().addingTimeInterval(3 * 86400), status: "allowed"), updatedAt: Date())
+        usageToday = UsageSummary(calls: 38, failures: 1, inputTokens: 61_400, outputTokens: 9_800, cacheReadTokens: 120_000, costUSD: 1.42, avgSeconds: 6.3)
+        var st = WeeklyStats(from: Date().addingTimeInterval(-7 * 86400), to: Date())
+        st.received = 142; st.receivedPrevious = 118; st.sent = 31; st.sentPrevious = 36
+        st.categories = [CategoryDelta(name: "Newsletter", now: 48, previous: 29), CategoryDelta(name: "Benachrichtigungen", now: 40, previous: 38),
+                         CategoryDelta(name: "Rechnungen", now: 7, previous: 11), CategoryDelta(name: "Handlung nötig", now: 12, previous: 9)]
+        st.medianReplyHours = 5.4; st.replySamples = 17; st.openNeedsReply = 3; st.openWaiting = 14
+        st.lateReplies = [ThreadAge(threadKey: "a", subject: "Contract Opportunity – Luxembourg", counterpart: "Portia Hotchkiss", days: 2)]
+        st.overdueWaiting = [ThreadAge(threadKey: "b", subject: "Fragenkatalog Informationssicherheit", counterpart: "alain.kremer@reisdorf.lu", days: 6),
+                             ThreadAge(threadKey: "c", subject: "Akku", counterpart: "Karl-Heinz Hartmann", days: 8)]
+        st.invoicesNew = 3; st.invoicesNewTotal = ["EUR": 1330.45]; st.invoicesOverdue = 1; st.invoicesOverdueTotal = ["EUR": 1235]
+        weeklyReport = WeeklyReport(date: Date(), text: "## Überblick\nDiese Woche kamen 142 Mails (+24). Der Zuwachs liegt fast allein bei Newslettern.\n\n## Hier bist du säumig\n- **Contract Opportunity – Luxembourg** (Portia Hotchkiss): seit 2 Tagen offen.\n\n## Empfehlung\n- Newsletter-Absender prüfen, die du nie öffnest.\n- Fragenkatalog nachfassen.", stats: st)
         corrections = [
             Correction(id: 1, date: Date().addingTimeInterval(-1800), messageId: "a", subject: "Ihre Rechnung Oktober", senderEmail: "news@shop.example",
                        fromCategory: "Newsletter", toCategory: "Rechnungen", toInbox: false, source: "mail"),
@@ -252,8 +288,13 @@ final class Engine: ObservableObject {
                        body: "\(c.analyzed) Mails katalogisiert, \(c.moved) einsortiert.", id: "initial")
                 break
             } catch {
-                lastError = error.localizedDescription
-                status = "Erstscan unterbrochen – neuer Versuch in 5 Minuten"
+                if case ClaudeError.blocked(let reason) = error {
+                    lastError = nil
+                    status = "Erstscan pausiert: \(reason) – nächster Versuch in 5 Minuten"
+                } else {
+                    lastError = error.localizedDescription
+                    status = "Erstscan unterbrochen – neuer Versuch in 5 Minuten"
+                }
                 try? await Task.sleep(for: .seconds(300))
             }
         }
@@ -332,11 +373,21 @@ final class Engine: ObservableObject {
             await generateFollowUps()
             await syncDeadlines()
             await extractInvoices(limit: 6)
+            await learnStyleIfNeeded()
+            await weeklyReportIfDue()
+            await syncReadStateIfDue()
+            backupIfDue()
             try await briefingIfDue(claude: claude)
             status = result.remaining > 0 ? "\(result.remaining) weitere Mails im nächsten Durchlauf" : "Aktuell"
         } catch {
-            lastError = error.localizedDescription
-            status = "Fehler"
+            if case ClaudeError.blocked(let reason) = error {
+                // Bewusste Pause (Abo-Limit): kein Fehler, nur Hinweis.
+                lastError = nil
+                status = "Pausiert: \(reason)"
+            } else {
+                lastError = error.localizedDescription
+                status = "Fehler"
+            }
         }
     }
 
@@ -362,6 +413,7 @@ final class Engine: ObservableObject {
         for m in pending {
             let key = try store.resolveThreadKey(for: m)
             try store.setThreadKey(key, for: m.messageId)
+            if routeIfPrivate(m, key: key) { continue }
             keyed.append((m, key))
         }
 
@@ -415,7 +467,8 @@ final class Engine: ObservableObject {
             let history = try store.messages(inThread: key, limit: 6)
             let a = try await claude.analyze(message: m, thread: existing, history: history,
                                              settings: settings, myAddresses: myAddresses,
-                                             hints: Learner.hints(for: m, store: store, settings: settings))
+                                             hints: Learner.hints(for: m, store: store, settings: settings),
+                                             styleGuide: settings.useStyleProfile ? styleProfile : "")
             try record(m, key: key, analysis: a)
         } catch {
             handle(error, for: [m])
@@ -583,7 +636,8 @@ final class Engine: ObservableObject {
                 guard let m = byId[item.messageId] else { continue }
                 if r.ok {
                     if let flag = item.flag {
-                        store.log(m, kind: "flag", detail: "\(flag.label) markiert (\(m.category ?? ""))", dryRun: false)
+                        let extra = r.prevFlagged.map { ActivityEntry.flagExtra(flagged: $0, index: r.prevFlagIndex ?? -1) }
+                        store.log(m, kind: "flag", detail: "\(flag.label) markiert (\(m.category ?? ""))", dryRun: false, extra: extra)
                     }
                     if let target = item.target {
                         let found = r.verified ?? true
@@ -668,12 +722,18 @@ final class Engine: ObservableObject {
         }
     }
 
-    func redraft(_ thread: MailThread, hint: String) async -> String? {
-        guard let claude else { lastError = ClaudeError.notFound.localizedDescription; return nil }
+    func redraft(_ thread: MailThread, hint: String, interactive: Bool = true) async -> String? {
+        if thread.isPrivate {
+            lastError = "Dieses Gespräch ist vom Datenschutz ausgenommen – Claude erhält keinen Inhalt."
+            return nil
+        }
+        guard let claude = (interactive ? claudeInteractive : self.claude) else { lastError = ClaudeError.notFound.localizedDescription; return nil }
         do {
             let msgs = messages(in: thread)
             let followUp = thread.isFollowUpCase
-            let text = try await claude.redraft(thread: thread, messages: msgs, hint: hint, settings: settings, followUp: followUp)
+            let style = styleContext(for: thread, messages: msgs, examples: true)
+            let text = try await claude.redraft(thread: thread, messages: msgs, hint: hint, settings: settings, followUp: followUp,
+                                                styleGuide: style.guide, examples: style.examples)
             var t = thread
             t.draft = text
             if followUp {
@@ -693,7 +753,8 @@ final class Engine: ObservableObject {
     }
 
     func undo(_ entry: ActivityEntry) async {
-        guard entry.canUndo, let from = entry.fromMailbox, let to = entry.toMailbox,
+        if entry.canUndoFlag { await undoFlags([entry]); return }
+        guard entry.canUndoMove, let from = entry.fromMailbox, let to = entry.toMailbox,
               let m = try? store.message(id: entry.messageId) else { return }
         do {
             let loc = MailBridge.Location(account: m.account, mailbox: to, mailId: m.mailId)
@@ -718,14 +779,15 @@ final class Engine: ObservableObject {
     }
 
     func generateBriefing() async {
-        guard let claude else { lastError = ClaudeError.notFound.localizedDescription; return }
+        guard let claude = claudeInteractive else { lastError = ClaudeError.notFound.localizedDescription; return }
         do { try await generateBriefing(claude: claude) } catch { lastError = error.localizedDescription }
     }
 
     private func generateBriefing(claude: ClaudeClient) async throws {
         isBriefing = true
         defer { isBriefing = false }
-        let open = threads.filter { $0.status == .needsReply || $0.status == .waiting || $0.dueDate != nil && $0.status != .done }
+        // Vertrauliche Gespräche (auch Betreff und Absender) gehören nie in die Anfrage an Claude.
+        let open = threads.filter { !$0.isPrivate && !$0.isSnoozed && ($0.status == .needsReply || $0.status == .waiting || $0.dueDate != nil && $0.status != .done) }
         let newCount = store.countMessages(since: Date().addingTimeInterval(-86400))
         let text = try await claude.briefing(threads: Array(open.prefix(60)), newCount: newCount, settings: settings,
                                           invoices: invoices.filter { $0.isOverdue() || $0.isDue(within: 14) })
@@ -757,7 +819,7 @@ final class Engine: ObservableObject {
     }
 
     func testClaude() async -> String {
-        guard let claude else { return ClaudeError.notFound.localizedDescription }
+        guard let claude = claudeInteractive else { return ClaudeError.notFound.localizedDescription }
         do {
             let r = try await claude.ping()
             return "Verbindung ok (\(claude.executable)): \(r)"

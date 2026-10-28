@@ -128,3 +128,33 @@ extension Store {
                     [threadKey, due, kind, extId, Date()])
     }
 }
+
+/// Datenschutz: Mails und Gespräche, deren Inhalt nie an Claude geht.
+extension Store {
+    /// Markiert die Nachricht als vertraulich: kein Mailtext (außer `keepBody`), keine Zusammenfassung, nicht zur Analyse vorgemerkt.
+    func markPrivate(_ messageId: String, threadKey: String, keepBody: Bool, category: String?, priority: Priority?, decidedBy: String?) throws {
+        try db.exec("""
+            UPDATE messages SET is_private = 1, processed = 1, thread_key = ?, category = ?, priority = ?, decided_by = ?, error = NULL,
+                summary = 'Vertraulich – Inhalt nicht an Claude gesendet', content = CASE WHEN ? THEN content ELSE '' END
+            WHERE message_id = ?
+            """, [threadKey, category, priority?.rawValue, decidedBy, keepBody, messageId])
+        try? indexMessage(messageId)
+    }
+
+    /// Alle gespeicherten Mails der Konten (für die nachträgliche Prüfung neuer Datenschutz-Regeln).
+    func allMessages(accounts: [String], limit: Int = 50_000) throws -> [StoredMessage] {
+        try db.query("SELECT * FROM messages WHERE account IN \(inList(accounts)) ORDER BY date DESC LIMIT ?", accounts + [limit]).map(message)
+    }
+
+    func markThreadPrivate(_ key: String) throws {
+        try db.exec("""
+            UPDATE threads SET is_private = 1, summary = 'Vertraulich – Inhalt wird nicht an Claude gesendet.', next_step = '',
+                due_date = NULL, draft = NULL, draft_for = NULL, draft_kind = NULL WHERE thread_key = ?
+            """, [key])
+        try? indexThread(key)
+    }
+
+    func isThreadPrivate(_ key: String) -> Bool {
+        ((try? db.query("SELECT is_private FROM threads WHERE thread_key = ?", [key]))?.first?.bool("is_private")) ?? false
+    }
+}

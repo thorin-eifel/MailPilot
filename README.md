@@ -10,6 +10,14 @@ Menüleisten-App mit Dashboard, die Apple Mail mit Claude automatisiert:
 - **Nachfass-Entwürfe** – Wird ein „wartet auf Antwort“-Gespräch überfällig, schreibt Claude automatisch eine freundliche Nachfrage. „In Mail öffnen“ legt eine neue Nachricht an dieselben Empfänger an (mit Zitat deiner letzten Mail); gesendet wird nichts.
 - **Fristen in Erinnerungen und Kalender** – Fristen aus Gesprächen (von Claude erkannt oder selbst gesetzt) landen auf Wunsch automatisch als Erinnerung (9 Uhr am Fristtag) und/oder ganztägiger Termin; jede Frist nur einmal, ohne Werbung und Newsletter. Pro Gespräch auch von Hand.
 - **Rechnungen** – Mails der Kategorie „Rechnungen“ werden samt PDF-Anhang ausgelesen (eingebetteter Text, bei Scans per Texterkennung): Aussteller, Nummer, Betrag brutto, USt, Datum, Fälligkeit. Übersicht mit Summen, offen/bezahlt/überfällig, Korrekturformular und **CSV-Export** für die Buchhaltung (Semikolon, Dezimalkomma, UTF-8). Fälligkeiten werden zur Frist des Gesprächs.
+- **Datenschutz-Ausnahmen** – Absender, Domains oder Stichworte (bei gesendeten Mails: Empfänger), deren Inhalt **nie** an Claude geht: keine Analyse, kein Entwurf, kein Briefing, keine Rechnungsauslesung, weder Mailtext noch Betreff. Auf Wunsch wird der Mailtext gar nicht gespeichert; bereits gespeicherte Inhalte lassen sich nachträglich entfernen. Alle Gespräche, die eine solche Mail enthalten, gelten als vertraulich.
+- **Claude-Nutzung** – Aufrufe, Token und Dauer je Tag und Zweck, dazu die echte Abo-Auslastung (5-Stunden- und 7-Tage-Fenster, aus der Claude-CLI). Automatische Aufrufe pausieren, wenn das Limit fast erreicht ist (einstellbar, plus Tageslimit); was du per Knopfdruck startest, läuft immer.
+- **Volltextsuche** – über Betreff, Absender, Zusammenfassungen und Mailtexte aller gespeicherten Gespräche, auch bereits verschobener Mails (SQLite FTS5, Umlaute egal, Phrasen mit Anführungszeichen).
+- **Antwortstil** – MailPilot lernt aus deinen gesendeten Mails (ohne Zitate) einen Stilleitfaden; Entwürfe nutzen ihn plus frühere Mails an dieselbe Person als Beispiel.
+- **Wochenbericht** – Zahlen gegen die Vorwoche, Kategorien-Wachstum, mediane Antwortzeit, wo du säumig bist und worauf du wartest; Text von Claude, montags automatisch.
+- **Newsletter abbestellen** – erkennt Absender, deren Mails du nie öffnest, und meldet sie auf deinen Klick ab (Ein-Klick nach RFC 8058, Link oder vorbereitete E-Mail). Unsichere Ziele (http, IP-Adressen, lokale Hosts) werden nie angesprochen.
+- **Rückgängig für Flaggen** – MailPilot merkt sich den Zustand vor dem Markieren; einzeln oder für alle zurücknehmbar.
+- **Sicherung und Export** – tägliche Sicherung der Datenbank (7 behalten), Wiederherstellung beim nächsten Start (mit Sicherheitskopie des alten Stands), Export als JSON (Mailtexte nur auf Wunsch, vertrauliche nie) und Gespräche als CSV, Einstellungen übertragbar.
 - **Gesprächs-Tracking** – Mails werden über `References`/`In-Reply-To` (oder Betreff + Gegenseite) zu Gesprächen gruppiert. Pro Gespräch pflegt Claude Status (*Antwort nötig*, *Wartet auf Antwort*, *Info*, *Erledigt*), Zusammenfassung, nächsten Schritt und Frist.
 - **Follow-ups** – Gespräche, in denen du seit X Tagen auf Antwort wartest, werden als überfällig markiert und gemeldet.
 - **Tägliches Briefing** – ab einer einstellbaren Uhrzeit fasst Claude den Tag zusammen.
@@ -44,6 +52,11 @@ Tests ohne Änderungen an Mail:
 .build/release/MailPilot --selftest-features     # Zurückstellen, Nachfassen, Fristen, Rechnungen, CSV, PDF/OCR (40 Prüfungen)
 .build/release/MailPilot --selftest-live --claude --compose --attach   # echte Anbindungen (Claude-Aufrufe, Mail-Fenster unsichtbar, Anhänge)
 .build/release/MailPilot --selftest-live --export  # legt Erinnerung und Termin an und löscht sie sofort wieder
+```
+
+```bash
+.build/release/MailPilot --selftest-more         # Datenschutz, Nutzung, Suche, Stil, Wochenbericht, Newsletter, Flaggen, Sicherung, Export
+.build/release/MailPilot --selftest-live --newsletter --flagrestore   # lesende Mail-Tests
 ```
 
 Selbsttest der Mail- und Claude-Anbindung:

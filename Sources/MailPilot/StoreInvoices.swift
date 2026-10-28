@@ -48,7 +48,7 @@ extension Store {
     func invoiceQueue(category: String, accounts: [String], limit: Int) throws -> [StoredMessage] {
         try db.query("""
             SELECT m.* FROM messages m LEFT JOIN invoices i ON i.message_id = m.message_id
-            WHERE i.message_id IS NULL AND m.processed = 1 AND m.is_from_me = 0 AND m.category = ? AND m.account IN \(inList(accounts))
+            WHERE i.message_id IS NULL AND m.processed = 1 AND m.is_from_me = 0 AND m.is_private = 0 AND m.category = ? AND m.account IN \(inList(accounts))
             ORDER BY m.date DESC LIMIT ?
             """, [category] + accounts + [limit]).map(message)
     }
@@ -56,7 +56,7 @@ extension Store {
     func invoiceQueueCount(category: String, accounts: [String]) -> Int {
         ((try? db.query("""
             SELECT COUNT(*) AS n FROM messages m LEFT JOIN invoices i ON i.message_id = m.message_id
-            WHERE i.message_id IS NULL AND m.processed = 1 AND m.is_from_me = 0 AND m.category = ? AND m.account IN \(inList(accounts))
+            WHERE i.message_id IS NULL AND m.processed = 1 AND m.is_from_me = 0 AND m.is_private = 0 AND m.category = ? AND m.account IN \(inList(accounts))
             """, [category] + accounts))?.first?.int("n")) ?? 0
     }
 }

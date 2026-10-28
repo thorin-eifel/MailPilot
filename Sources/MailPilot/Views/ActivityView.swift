@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ActivityView: View {
     @EnvironmentObject var engine: Engine
+    @ViewState private var confirmFlags = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -12,6 +13,10 @@ struct ActivityView: View {
                 }
                 Spacer()
                 summary
+                if !engine.undoableFlags.isEmpty {
+                    Button { confirmFlags = true } label: { Label("Alle Flaggen zurücknehmen", systemImage: "flag.slash") }
+                        .buttonStyle(.ctwSecondary)
+                }
             }
 
             Table(engine.activity) {
@@ -54,6 +59,12 @@ struct ActivityView: View {
         }
         .padding(20)
         .background(CTW.bg)
+        .confirmationDialog("\(engine.undoableFlags.count) Flaggen zurücknehmen?", isPresented: $confirmFlags, titleVisibility: .visible) {
+            Button("Flaggen zurücknehmen", role: .destructive) { Task { await engine.undoFlags(engine.undoableFlags) } }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Jede Flagge wird auf den Stand vor MailPilot zurückgesetzt: war die Mail vorher nicht markiert, wird die Flagge entfernt. Nur Einträge, bei denen dieser Stand bekannt ist.")
+        }
     }
 
     private var summary: some View {

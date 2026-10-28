@@ -71,6 +71,9 @@ struct RawMessage: Decodable {
     var cc: [String]
     var content: String
     var isSent: Bool
+    /// Wert des Headers `List-Unsubscribe` (Newsletter-Abmeldung) und `List-Unsubscribe-Post`.
+    var unsubscribe: String?
+    var unsubscribePost: String?
 }
 
 struct MailAccountInfo: Decodable, Identifiable, Hashable {
@@ -102,6 +105,8 @@ struct StoredMessage: Identifiable, Hashable {
     var error: String?
     /// Woher die Kategorie stammt: „Claude“, „Regel: …“, „VIP“ oder „Korrektur“.
     var decidedBy: String?
+    /// Vom Datenschutz ausgenommen: Inhalt ging nie an Claude.
+    var isPrivate = false
 
     var id: String { messageId }
 
@@ -137,6 +142,8 @@ struct MailThread: Identifiable, Hashable {
     var draftKind: String?
     /// Bis dahin aus allen Listen ausgeblendet („Montag wieder zeigen“).
     var snoozedUntil: Date?
+    /// Enthält eine vom Datenschutz ausgenommene Nachricht: nie an Claude, nicht im Briefing.
+    var isPrivate = false
 
     var id: String { threadKey }
 
@@ -162,8 +169,23 @@ struct ActivityEntry: Identifiable, Hashable {
     var toMailbox: String?
     var dryRun: Bool
     var undone: Bool
+    /// Bei Flaggen: früherer Zustand als JSON (`{"flagged":false,"index":-1}`), nötig für „Rückgängig“.
+    var extra: String? = nil
 
-    var canUndo: Bool { kind == "move" && !dryRun && !undone && fromMailbox != nil && toMailbox != nil }
+    var canUndo: Bool { canUndoMove || canUndoFlag }
+    var canUndoMove: Bool { kind == "move" && !dryRun && !undone && fromMailbox != nil && toMailbox != nil }
+    var canUndoFlag: Bool { kind == "flag" && !dryRun && !undone && previousFlag != nil }
+
+    /// Früherer Flaggenzustand (nur bei Einträgen, die ihn festgehalten haben).
+    var previousFlag: (flagged: Bool, index: Int)? {
+        guard let extra, let d = try? JSONSerialization.jsonObject(with: Data(extra.utf8)) as? [String: Any],
+              let f = d["flagged"] as? Bool else { return nil }
+        return (f, (d["index"] as? Int) ?? -1)
+    }
+
+    static func flagExtra(flagged: Bool, index: Int) -> String {
+        "{\"flagged\":\(flagged),\"index\":\(index)}"
+    }
 }
 
 struct Briefing: Hashable {

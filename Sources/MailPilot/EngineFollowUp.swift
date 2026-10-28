@@ -73,7 +73,7 @@ enum FollowUp {
     static func candidates(_ threads: [MailThread], followUpDays: Int, now: Date = Date()) -> [MailThread] {
         func rank(_ p: Priority) -> Int { p == .high ? 0 : (p == .normal ? 1 : 2) }
         return threads
-            .filter { $0.isFollowUpCase && !$0.isSnoozed && ($0.draft ?? "").isEmpty
+            .filter { $0.isFollowUpCase && !$0.isSnoozed && !$0.isPrivate && ($0.draft ?? "").isEmpty
                 && $0.lastDate < now.addingTimeInterval(-Double(followUpDays) * 86400) }
             .sorted { rank($0.priority) != rank($1.priority) ? rank($0.priority) < rank($1.priority) : $0.lastDate < $1.lastDate }
     }
@@ -97,10 +97,10 @@ extension Engine {
 
     /// Bereitet für überfällige Gespräche Nachfass-Entwürfe vor (höchstens `limit` je Durchlauf).
     func generateFollowUps(limit: Int = 3) async {
-        guard settings.autoFollowUpDrafts, claude != nil else { return }
+        guard settings.autoFollowUpDrafts, claude != nil, UsageMonitor.shared.blockReason() == nil else { return }
         for t in FollowUp.candidates(threads, followUpDays: settings.followUpDays).prefix(limit) {
             status = "Nachfass-Entwurf: \(t.subject.prefix(40))"
-            guard await redraft(t, hint: "") != nil else { break }
+            guard await redraft(t, hint: "", interactive: false) != nil else { break }
             notify(title: "Nachfass-Entwurf bereit", body: "\(t.subject) – \(t.counterpart)", id: "fu-draft-\(t.threadKey)")
         }
     }
@@ -127,5 +127,16 @@ extension Engine {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+}
+
+extension Engine {
+    /// Fragt die aktuelle Abo-Auslastung mit einem winzigen Aufruf ab.
+    func refreshPlanLimits() async {
+        guard let path = ClaudeClient.locate(preferred: settings.claudePath) else { lastError = ClaudeError.notFound.localizedDescription; return }
+        var c = ClaudeClient(executable: path, model: "haiku")
+        c.interactive = true
+        do { _ = try await c.tagged("Limit-Abfrage").ping() } catch { lastError = error.localizedDescription }
+        refreshUsage()
     }
 }

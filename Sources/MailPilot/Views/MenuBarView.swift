@@ -99,6 +99,12 @@ struct MenuBarView: View {
                     Text(engine.status).font(.caption).foregroundStyle(CTW.muted).lineLimit(1)
                 }
             }
+            if let reason = engine.usageBlock {
+                Label(reason, systemImage: "pause.circle.fill").font(.caption).foregroundStyle(CTW.action)
+            } else if let l = engine.planLimits, let w = l.fiveHour, w.isCurrent {
+                Label("Claude 5 h: \(w.percent) %" + (l.sevenDay.map { " · 7 Tage: \($0.percent) %" } ?? ""), systemImage: "gauge.with.dots.needle.50percent")
+                    .font(.caption).foregroundStyle(CTW.muted)
+            }
             if let err = engine.lastError {
                 Label(err, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)

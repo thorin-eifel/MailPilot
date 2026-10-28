@@ -87,6 +87,7 @@ final class Store: @unchecked Sendable {
     init(path: URL = Paths.database) throws {
         db = try Database(path: path.path)
         try migrate()
+        try ensureSearchIndex()
     }
 
     private func migrate() throws {
@@ -117,6 +118,12 @@ final class Store: @unchecked Sendable {
         """)
         try db.exec("CREATE TABLE IF NOT EXISTS briefings (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, text TEXT)")
         try db.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+        try? db.exec("ALTER TABLE activity ADD COLUMN extra TEXT")
+        try? db.exec("ALTER TABLE messages ADD COLUMN is_read INTEGER")
+        try? db.exec("ALTER TABLE messages ADD COLUMN unsub TEXT")
+        try? db.exec("ALTER TABLE messages ADD COLUMN unsub_post TEXT")
+        try? db.exec("ALTER TABLE threads ADD COLUMN is_private INTEGER DEFAULT 0")
+        try? db.exec("ALTER TABLE messages ADD COLUMN is_private INTEGER DEFAULT 0")
         try? db.exec("ALTER TABLE threads ADD COLUMN snoozed_until REAL")
         try? db.exec("ALTER TABLE threads ADD COLUMN draft_kind TEXT")
         try? db.exec("ALTER TABLE messages ADD COLUMN decided_by TEXT")
@@ -137,6 +144,18 @@ final class Store: @unchecked Sendable {
             vendor TEXT, number TEXT, amount REAL, vat REAL, currency TEXT, issue_date TEXT, due_date TEXT, description TEXT,
             source TEXT, file_name TEXT, paid INTEGER DEFAULT 0, status TEXT, error TEXT, ts REAL)
         """)
+        try db.exec("""
+        CREATE TABLE IF NOT EXISTS usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, purpose TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER,
+            cache_read_tokens INTEGER, cost_usd REAL, duration_ms INTEGER, ok INTEGER, interactive INTEGER)
+        """)
+        try db.exec("CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts)")
+        try db.exec("""
+        CREATE TABLE IF NOT EXISTS unsub (
+            sender_email TEXT PRIMARY KEY, name TEXT, status TEXT DEFAULT 'open', method TEXT, target TEXT, one_click INTEGER DEFAULT 0,
+            checked REAL, done REAL)
+        """)
+        try db.exec("CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, kind TEXT, text TEXT, stats TEXT)")
         try db.exec("""
         CREATE TABLE IF NOT EXISTS suggestions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, kind TEXT, value TEXT, category TEXT,
@@ -166,11 +185,12 @@ final class Store: @unchecked Sendable {
         let date = Date.fromISO(raw.date) ?? Date()
         try db.exec("""
         INSERT OR IGNORE INTO messages (message_id, mail_id, account, mailbox, subject, sender, sender_email,
-            recipients, date, is_from_me, in_reply_to, refs, content)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            recipients, date, is_from_me, in_reply_to, refs, content, is_read, unsub, unsub_post)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [raw.messageId, raw.id, raw.account, raw.mailbox, raw.subject, raw.sender, senderEmail,
               (raw.to + raw.cc).joined(separator: ","), date, isFromMe, raw.inReplyTo,
-              raw.references.joined(separator: " "), raw.content])
+              raw.references.joined(separator: " "), raw.content, raw.read.map { $0 ? 1 : 0 }, raw.unsubscribe, raw.unsubscribePost])
+        try? indexMessage(raw.messageId)
     }
 
     /// `IN (?, ?, …)`-Klausel für eine Kontenliste.
@@ -195,6 +215,7 @@ final class Store: @unchecked Sendable {
                       decidedBy: String? = nil) throws {
         try db.exec("UPDATE messages SET thread_key = ?, category = ?, priority = ?, summary = ?, decided_by = ?, processed = 1, error = NULL WHERE message_id = ?",
                     [threadKey, category, priority?.rawValue, summary, decidedBy, messageId])
+        try? indexMessage(messageId)
     }
 
     func setThreadKey(_ key: String, for messageId: String) throws {
@@ -252,7 +273,8 @@ final class Store: @unchecked Sendable {
             summary: r.string("summary"),
             processed: r.int("processed") == 1,
             error: r.string("error"),
-            decidedBy: r.string("decided_by")
+            decidedBy: r.string("decided_by"),
+            isPrivate: r.bool("is_private")
         )
     }
 
@@ -297,14 +319,14 @@ final class Store: @unchecked Sendable {
     }
 
     func upsert(_ t: MailThread) throws {
+        // UPSERT statt REPLACE: Die Zeile behält ihre rowid, an der der Suchindex hängt.
         try db.exec("""
-        INSERT OR REPLACE INTO threads (thread_key, subject, norm_subject, counterpart, last_date, last_from_me,
-            message_count, status, summary, next_step, due_date, priority, category, draft, draft_for, followup_notified,
-            draft_kind, snoozed_until)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO threads (thread_key, subject, norm_subject, counterpart, last_date, last_from_me, message_count, status, summary, next_step, due_date, priority, category, draft, draft_for, followup_notified, draft_kind, snoozed_until, is_private) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(thread_key) DO UPDATE SET subject = excluded.subject, norm_subject = excluded.norm_subject, counterpart = excluded.counterpart, last_date = excluded.last_date, last_from_me = excluded.last_from_me, message_count = excluded.message_count, status = excluded.status, summary = excluded.summary, next_step = excluded.next_step, due_date = excluded.due_date, priority = excluded.priority, category = excluded.category, draft = excluded.draft, draft_for = excluded.draft_for, followup_notified = excluded.followup_notified, draft_kind = excluded.draft_kind, snoozed_until = excluded.snoozed_until, is_private = excluded.is_private
         """, [t.threadKey, t.subject, t.normSubject, t.counterpart, t.lastDate, t.lastFromMe, t.messageCount,
               t.status.rawValue, t.summary, t.nextStep, t.dueDate, t.priority.rawValue, t.category,
-              t.draft, t.draftFor, t.followupNotified, t.draftKind, t.snoozedUntil])
+              t.draft, t.draftFor, t.followupNotified, t.draftKind, t.snoozedUntil, t.isPrivate])
+        try? indexThread(t.threadKey)
     }
 
     private func thread(_ r: Row) -> MailThread {
@@ -326,18 +348,19 @@ final class Store: @unchecked Sendable {
             draftFor: r.string("draft_for"),
             followupNotified: r.bool("followup_notified"),
             draftKind: r.string("draft_kind"),
-            snoozedUntil: r.double("snoozed_until") > 0 ? r.date("snoozed_until") : nil
+            snoozedUntil: r.double("snoozed_until") > 0 ? r.date("snoozed_until") : nil,
+            isPrivate: r.bool("is_private")
         )
     }
 
     // MARK: Aktivität
 
     @discardableResult
-    func log(_ m: StoredMessage, kind: String, detail: String, from: String? = nil, to: String? = nil, dryRun: Bool) -> Int64 {
+    func log(_ m: StoredMessage, kind: String, detail: String, from: String? = nil, to: String? = nil, dryRun: Bool, extra: String? = nil) -> Int64 {
         try? db.exec("""
-        INSERT INTO activity (ts, message_id, subject, kind, detail, account, from_mailbox, to_mailbox, dry_run)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, [Date(), m.messageId, m.subject, kind, detail, m.account, from, to, dryRun])
+        INSERT INTO activity (ts, message_id, subject, kind, detail, account, from_mailbox, to_mailbox, dry_run, extra)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [Date(), m.messageId, m.subject, kind, detail, m.account, from, to, dryRun, extra])
         return db.lastInsertId
     }
 
@@ -347,7 +370,7 @@ final class Store: @unchecked Sendable {
                           subject: r.string("subject") ?? "", kind: r.string("kind") ?? "",
                           detail: r.string("detail") ?? "", account: r.string("account") ?? "",
                           fromMailbox: r.string("from_mailbox"), toMailbox: r.string("to_mailbox"),
-                          dryRun: r.bool("dry_run"), undone: r.bool("undone"))
+                          dryRun: r.bool("dry_run"), undone: r.bool("undone"), extra: r.string("extra"))
         }
     }
 

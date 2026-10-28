@@ -227,8 +227,68 @@ enum FeatureSelfTest {
                     let draft = try await client.redraft(thread: t, messages: [out], hint: "", settings: settings, followUp: true)
                     print("Claude Nachfass-Entwurf:\n---\n\(draft)\n---")
                     check(draft.count > 60 && draft.count < 1200 && !draft.hasPrefix("Betreff"), "Claude schreibt einen Nachfass-Entwurf in sinnvoller Länge")
+                    // Antwortstil: aus synthetischen Proben lernen und im Entwurf verwenden
+                    let bodies = [
+                        "Hallo Herr Weber,\n\nanbei das Angebot für die Server-Migration. Bei Fragen melden Sie sich gern.\n\nMit freundlichen Grüßen\nThorsten Schleicher\nCTW Computer",
+                        "Hallo Frau Becker,\n\nvielen Dank für Ihre Nachricht. Den Termin am Dienstag bestätige ich gern.\n\nMit freundlichen Grüßen\nThorsten Schleicher\nCTW Computer",
+                        "Hi Karl-Heinz,\n\nkurz zur Info: Akku ist bestellt, kommt Donnerstag. Sag Bescheid, falls es eilt.\n\nGruß\nThorsten",
+                        "Hi Karl-Heinz,\n\nlink zum Produkt hab ich dir geschickt, schau mal drüber.\n\nGruß\nThorsten",
+                    ]
+                    let samples = (0..<12).map { StyleLearner.Sample(recipient: "kontakt\($0 % 4)@example.org", body: bodies[$0 % bodies.count]) }
+                    let guide = try await client.learnStyle(samples: samples)
+                    print("Claude Stilleitfaden (\(guide.count) Zeichen):\n---\n\(guide)\n---")
+                    check(guide.count > 120 && guide.count < 2500 && (guide.contains("Du") || guide.contains("du")) && guide.contains("Sie"), "Claude leitet einen Stilleitfaden ab (Du und Sie erkannt)")
+                    let styled = try await client.redraft(thread: t, messages: [out], hint: "", settings: settings, followUp: true, styleGuide: guide, examples: [bodies[0]])
+                    print("Claude Entwurf im Stil:\n---\n\(styled)\n---")
+                    check(styled.contains("Thorsten") && styled.count > 60, "Entwurf im gelernten Stil enthält Grußformel und Signatur")
+                    // Wochenbericht
+                    var stats = WeeklyStats(from: Date().addingTimeInterval(-7 * 86400), to: Date())
+                    stats.received = 42; stats.receivedPrevious = 30; stats.sent = 12; stats.sentPrevious = 15
+                    stats.categories = [CategoryDelta(name: "Newsletter", now: 20, previous: 8), CategoryDelta(name: "Rechnungen", now: 4, previous: 6)]
+                    stats.lateReplies = [ThreadAge(threadKey: "a", subject: "Angebot Server-Migration", counterpart: "Weber", days: 5)]
+                    stats.overdueWaiting = [ThreadAge(threadKey: "b", subject: "Rückruf API-Leasing", counterpart: "Hartmann", days: 6)]
+                    stats.medianReplyHours = 7.5; stats.replySamples = 9; stats.openNeedsReply = 3; stats.openWaiting = 5
+                    let report = try await client.weeklyReport(stats: stats, settings: settings)
+                    print("Claude Wochenbericht:\n---\n\(report)\n---")
+                    check(report.contains("##") && report.contains("Server-Migration") && report.contains("Hartmann"), "Claude schreibt den Wochenbericht mit den genannten Gesprächen")
+                    // Abo-Auslastung aus der CLI-Ausgabe
+                    let limits = UsageMonitor.shared.currentLimits
+                    print("Abo-Auslastung: 5 Std. \(limits?.fiveHour?.percent.description ?? "–") %, 7 Tage \(limits?.sevenDay?.percent.description ?? "–") %")
+                    check(limits?.fiveHour != nil && limits?.sevenDay != nil, "Abo-Auslastung wird aus den Claude-Aufrufen gelesen")
                 } catch {
                     check(false, "Claude-Tests liefen ohne Fehler: \(error.localizedDescription)")
+                }
+            }
+            if args.contains("--newsletter") {
+                do {
+                    let store = try Store()
+                    let msgs = try store.newsletterMessages(category: "Newsletter", accounts: ["iCloud", "thorin.eifel@icloud.com"], since: Date().addingTimeInterval(-90 * 86400))
+                    let groups = Dictionary(grouping: msgs.filter { $0.mailbox != "(entfernt)" }, by: { MailBridge.FolderRef(account: $0.account, path: $0.mailbox) })
+                    let states = try await bridge.readStates(Array(groups.keys.prefix(4)))
+                    let total = states.values.reduce(0) { $0 + $1.count }
+                    let unread = states.values.reduce(0) { $0 + $1.values.filter { !$0 }.count }
+                    print("Lesestatus: \(states.count) Ordner, \(total) Mails, davon \(unread) ungelesen")
+                    check(!states.isEmpty && total > 0, "Newsletter: Lesestatus aus Apple Mail gelesen")
+                    var withHeader = 0, methods: [String: Int] = [:]
+                    for m in msgs.prefix(8) {
+                        guard let info = try? await bridge.unsubscribeHeader(account: m.account, mailbox: m.mailbox, id: m.mailId, messageId: m.messageId) else { continue }
+                        if info.unsub != nil { withHeader += 1 }
+                        methods[UnsubOption.parse(header: info.unsub, post: info.post).method.rawValue, default: 0] += 1
+                    }
+                    print("Abmelde-Header: \(withHeader) von \(min(8, msgs.count)) Mails, Methoden: \(methods)")
+                    check(withHeader > 0, "Newsletter: List-Unsubscribe-Header aus Mails gelesen")
+                } catch {
+                    check(false, "Newsletter-Test: \(error.localizedDescription)")
+                }
+            }
+            if args.contains("--flagrestore") {
+                do {
+                    let item = MailBridge.BatchItem(messageId: "gibt-es-nicht@example.invalid", location: .init(account: "iCloud", mailbox: "INBOX", mailId: 1),
+                                                    target: nil, flag: nil, restoreFlag: (false, -1))
+                    let r = try await bridge.batch([item])
+                    check(r.count == 1 && !r[0].ok, "Flaggen: Zurücksetzen einer nicht vorhandenen Mail schlägt sauber fehl (nichts verändert)")
+                } catch {
+                    check(false, "Flaggen-Test: \(error.localizedDescription)")
                 }
             }
             if args.contains("--compose") {

@@ -3,7 +3,11 @@ import SwiftUI
 @main
 enum EntryPoint {
     static func main() {
-        if CommandLine.arguments.contains("--selftest-features") {
+        // Eine vorbereitete Wiederherstellung wird eingespielt, bevor die Datenbank geöffnet wird.
+        if !CommandLine.arguments.contains(where: { $0.hasPrefix("--selftest") || $0 == "--render" }) { Backups.applyPendingRestore() }
+        if CommandLine.arguments.contains("--selftest-more") {
+            SelfTest2.run()
+        } else if CommandLine.arguments.contains("--selftest-features") {
             FeatureSelfTest.run()
         } else if CommandLine.arguments.contains("--selftest-live") {
             FeatureSelfTest.runLive(CommandLine.arguments)
@@ -146,6 +150,8 @@ enum RenderPreview {
                 render(DashboardView(initial: .rules), size: NSSize(width: 1240, height: 1500), dark: dark, to: out.appendingPathComponent("rules-\(suffix).png"))
                 render(DashboardView(initial: .invoices), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("invoices-\(suffix).png"))
                 render(DashboardView(initial: .snoozed), size: NSSize(width: 1240, height: 560), dark: dark, to: out.appendingPathComponent("snoozed-\(suffix).png"))
+                render(DashboardView(initial: .weekly), size: NSSize(width: 1240, height: 1100), dark: dark, to: out.appendingPathComponent("weekly-\(suffix).png"))
+                render(DashboardView(initial: .usage), size: NSSize(width: 1240, height: 1100), dark: dark, to: out.appendingPathComponent("usage-\(suffix).png"))
                 render(DashboardView(initial: .settings), size: NSSize(width: 1240, height: 900), dark: dark, to: out.appendingPathComponent("settings-\(suffix).png"))
                 if let thread {
                     render(ThreadDetailView(thread: thread), size: NSSize(width: 760, height: 900), dark: dark, to: out.appendingPathComponent("thread-\(suffix).png"))

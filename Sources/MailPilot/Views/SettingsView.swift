@@ -51,6 +51,10 @@ struct SettingsView: View {
 
             DeadlinesSection()
 
+            PrivacySection()
+
+            StyleSection()
+
             Section(header: SectionHeader(title: "Claude", symbol: "sparkles")) {
                 Picker("Modell", selection: $engine.settings.model) {
                     Text("Sonnet (empfohlen)").tag("sonnet")
@@ -92,10 +96,7 @@ struct SettingsView: View {
                 }
             }
 
-            Section(header: SectionHeader(title: "Daten", symbol: "externaldrive.fill")) {
-                LabeledContent("Speicherort", value: Paths.appSupport.path)
-                Button("Im Finder zeigen") { NSWorkspace.shared.activateFileViewerSelecting([Paths.database]) }
-            }
+            DataSection()
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
@@ -319,5 +320,265 @@ struct DeadlinesSection: View {
                 .font(.caption).foregroundStyle(CTW.muted)
         }
         .task { await engine.loadExportTargets() }
+    }
+}
+
+/// Ausnahmen: Absender, Domains oder Stichworte, deren Inhalt nie an Claude gehen soll.
+struct PrivacySection: View {
+    @EnvironmentObject var engine: Engine
+    @ViewState private var preview: Engine.PrivacyPreview?
+    @ViewState private var confirm = false
+
+    var body: some View {
+        Section {
+            if engine.settings.privacyRules.isEmpty {
+                Label("Noch keine Ausnahmen. Beispiel: Domain „kanzlei-mueller.de“ oder Betreff enthält „Gesundheit“.", systemImage: "lock.shield")
+                    .font(.callout).foregroundStyle(CTW.muted)
+            }
+            ForEach($engine.settings.privacyRules) { $rule in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        Toggle("Aktiv", isOn: $rule.enabled).labelsHidden().toggleStyle(.switch)
+                        TextField("Name", text: $rule.name).textFieldStyle(.plain).font(.system(size: 14, weight: .semibold))
+                        Spacer()
+                        Button(role: .destructive) { engine.settings.privacyRules.removeAll { $0.id == rule.id } } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Ausnahme löschen")
+                    }
+                    ConditionsEditor(conditions: $rule.conditions, matchAll: $rule.matchAll)
+                    Toggle("Mailtext nicht speichern (empfohlen)", isOn: Binding(get: { !rule.keepBody }, set: { rule.keepBody = !$0 }))
+                        .toggleStyle(.switch)
+                }
+                .padding(12)
+                .background(CTW.surfaceSoft.opacity(rule.enabled ? 1 : 0.5), in: RoundedRectangle(cornerRadius: CTW.radius))
+                .overlay(RoundedRectangle(cornerRadius: CTW.radius).strokeBorder(CTW.lineSoft))
+            }
+            HStack {
+                Button { engine.settings.privacyRules.append(PrivacyRule()) } label: { Label("Ausnahme hinzufügen", systemImage: "plus") }
+                    .buttonStyle(.ctwSecondary)
+                Spacer()
+                Button {
+                    preview = engine.privacyPreview()
+                    confirm = true
+                } label: { Label("Gespeicherte Mails prüfen …", systemImage: "trash.slash") }
+                    .buttonStyle(.ctwSecondary)
+                    .disabled(engine.settings.privacyRules.isEmpty)
+            }
+        } header: {
+            SectionHeader(title: "Datenschutz", symbol: "lock.shield.fill")
+        } footer: {
+            Text("Auf diese Mails (bei gesendeten Mails: auf deren Empfänger) und auf alle Gespräche, die sie enthalten, hat Claude nie Zugriff: keine Analyse, kein Entwurf, kein Briefing, keine Rechnungsauslesung, weder Mailtext noch Betreff oder Absender. MailPilot sortiert sie nur mit deinen eigenen Regeln. Die Claude-CLI speichert keine Sitzungen.")
+                .font(.caption).foregroundStyle(CTW.muted)
+        }
+        .confirmationDialog("Gespeicherte Mails bereinigen?", isPresented: $confirm, titleVisibility: .visible) {
+            if let p = preview, !p.messages.isEmpty {
+                Button("\(p.messages.count) Mails bereinigen", role: .destructive) { engine.applyPrivacyRetroactively() }
+            }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            let n = preview?.messages.count ?? 0
+            Text(n == 0 ? "Auf keine bereits gespeicherte Mail trifft eine Ausnahme zu."
+                 : "\(n) gespeicherte Mails in \(preview?.threadKeys.count ?? 0) Gesprächen: Mailtext und Zusammenfassungen werden von diesem Rechner gelöscht. Schon an Claude gesendete Inhalte lassen sich nicht zurückholen; die Mails selbst in Apple Mail bleiben unverändert.")
+        }
+    }
+}
+
+/// Bedingungen (wie bei Regeln) bearbeiten.
+struct ConditionsEditor: View {
+    @Binding var conditions: [RuleCondition]
+    @Binding var matchAll: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Eyebrow(text: "Wenn")
+                Picker("", selection: $matchAll) {
+                    Text("alle Bedingungen zutreffen").tag(true)
+                    Text("mindestens eine zutrifft").tag(false)
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+            ForEach($conditions) { $c in
+                HStack(spacing: 8) {
+                    Picker("", selection: $c.field) {
+                        ForEach(RuleField.allCases) { Label($0.label, systemImage: $0.symbol).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 200)
+                    TextField(c.field.placeholder, text: $c.value).textFieldStyle(.roundedBorder)
+                    Button { conditions.removeAll { $0.id == c.id } } label: { Image(systemName: "minus.circle") }
+                        .buttonStyle(.borderless)
+                        .disabled(conditions.count <= 1)
+                        .accessibilityLabel("Bedingung entfernen")
+                }
+            }
+            Button { conditions.append(RuleCondition()) } label: { Label("Bedingung", systemImage: "plus") }
+                .buttonStyle(.borderless).foregroundStyle(CTW.accent)
+        }
+    }
+}
+
+/// Antwortstil: aus den eigenen gesendeten Mails lernen.
+struct StyleSection: View {
+    @EnvironmentObject var engine: Engine
+    @ViewState private var profile = ""
+    @ViewState private var loaded = false
+
+    var body: some View {
+        Section {
+            Toggle("Entwürfe in meinem Stil schreiben", isOn: $engine.settings.useStyleProfile)
+            HStack(spacing: 10) {
+                Text(engine.styleInfo).font(.callout).foregroundStyle(CTW.muted)
+                Spacer()
+                if engine.styleBusy { ProgressView().controlSize(.small) }
+                Button { Task { await engine.loadSentHistory() } } label: { Label("Sendeverlauf einlesen (180 Tage)", systemImage: "tray.and.arrow.down") }
+                    .buttonStyle(.ctwSecondary)
+                    .disabled(engine.styleBusy)
+                Button {
+                    Task { await engine.learnStyle(manual: true); profile = engine.styleProfile }
+                } label: { Label(engine.styleProfile.isEmpty ? "Stil lernen" : "Neu lernen", systemImage: "wand.and.stars") }
+                    .buttonStyle(.ctwPrimary)
+                    .disabled(engine.styleBusy)
+            }
+            if !engine.styleProfile.isEmpty || !profile.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Stilleitfaden (frei bearbeitbar)").font(.caption).foregroundStyle(CTW.muted)
+                    TextEditor(text: $profile)
+                        .frame(minHeight: 160)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .padding(8)
+                        .background(CTW.surfaceSoft, in: RoundedRectangle(cornerRadius: CTW.radius))
+                        .overlay(RoundedRectangle(cornerRadius: CTW.radius).strokeBorder(CTW.line))
+                        .onChange(of: profile) { _, new in if loaded { engine.setStyleProfile(new) } }
+                }
+            }
+        } header: {
+            SectionHeader(title: "Antwortstil", symbol: "signature")
+        } footer: {
+            Text("Zum Lernen schickt MailPilot bis zu 40 deiner gesendeten Mails (ohne zitierte Verläufe, ohne Mails an Empfänger mit Datenschutz-Ausnahme) an Claude und speichert nur den daraus abgeleiteten Leitfaden. Bei jedem Entwurf kommen der Leitfaden und bis zu zwei frühere Mails an dieselbe Person als Beispiel mit. Du kannst den Leitfaden jederzeit von Hand ändern.")
+                .font(.caption).foregroundStyle(CTW.muted)
+        }
+        .onAppear { profile = engine.styleProfile; DispatchQueue.main.async { loaded = true } }
+    }
+}
+
+/// Sicherung, Wiederherstellung und Export der lokalen Daten.
+struct DataSection: View {
+    @EnvironmentObject var engine: Engine
+    @ViewState private var includeBodies = false
+    @ViewState private var restoreURL: URL?
+    @ViewState private var restoreMessage: String?
+    @ViewState private var confirmRestore = false
+    @ViewState private var confirmImport = false
+    @ViewState private var importURL: URL?
+
+    var body: some View {
+        Section {
+            LabeledContent("Speicherort", value: Paths.appSupport.path)
+            LabeledContent("Datenbank", value: engine.databaseSizeText)
+            Toggle("Täglich automatisch sichern", isOn: $engine.settings.autoBackup)
+            if engine.settings.autoBackup {
+                Stepper("Letzte \(engine.settings.backupKeep) Sicherungen behalten", value: $engine.settings.backupKeep, in: 1...60)
+            }
+            HStack(spacing: 8) {
+                Text(engine.lastBackupText).font(.caption).foregroundStyle(CTW.muted)
+                Spacer()
+                Button { engine.backupNow() } label: { Label("Jetzt sichern", systemImage: "externaldrive.badge.plus") }.buttonStyle(.ctwSecondary)
+                Button { saveBackupAs() } label: { Label("Sichern unter …", systemImage: "square.and.arrow.down") }.buttonStyle(.ctwSecondary)
+                Button { NSWorkspace.shared.open(Backups.folder) } label: { Label("Ordner", systemImage: "folder") }.buttonStyle(.ctwSecondary)
+            }
+            HStack {
+                Text("Aus einer Sicherung wiederherstellen").foregroundStyle(CTW.ink)
+                Spacer()
+                Button { pickRestore() } label: { Label("Wiederherstellen …", systemImage: "arrow.counterclockwise") }.buttonStyle(.ctwSecondary)
+            }
+            if let restoreMessage { Label(restoreMessage, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(CTW.action) }
+            Divider().overlay(CTW.lineSoft)
+            HStack(spacing: 8) {
+                Toggle("Mailtexte in den Export aufnehmen", isOn: $includeBodies).toggleStyle(.switch)
+                Spacer()
+                Button { exportJSON() } label: { Label("Daten als JSON …", systemImage: "curlybraces") }.buttonStyle(.ctwSecondary)
+                Button { exportThreadsCSV() } label: { Label("Gespräche als CSV …", systemImage: "tablecells") }.buttonStyle(.ctwSecondary)
+            }
+            HStack(spacing: 8) {
+                Text("Regeln, Kategorien, VIPs und Ausnahmen übertragen").foregroundStyle(CTW.ink)
+                Spacer()
+                Button { exportSettings() } label: { Label("Einstellungen exportieren …", systemImage: "square.and.arrow.up") }.buttonStyle(.ctwSecondary)
+                Button { pickSettings() } label: { Label("Importieren …", systemImage: "square.and.arrow.down.on.square") }.buttonStyle(.ctwSecondary)
+            }
+        } header: {
+            SectionHeader(title: "Daten & Sicherung", symbol: "externaldrive.fill")
+        } footer: {
+            Text("Alle Daten liegen nur auf diesem Rechner. Sicherungen enthalten auch die gespeicherten Mailtexte und sind nur für dich lesbar; bewahre sie entsprechend auf. Der Export enthält standardmäßig keine Mailtexte, und vertrauliche Mails nie.")
+                .font(.caption).foregroundStyle(CTW.muted)
+        }
+        .confirmationDialog("Sicherung wiederherstellen?", isPresented: $confirmRestore, titleVisibility: .visible) {
+            Button("Wiederherstellen und MailPilot beenden", role: .destructive) {
+                if let url = restoreURL {
+                    restoreMessage = engine.restoreBackup(from: url)
+                    if restoreMessage == nil { NSApp.terminate(nil) }
+                }
+            }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("MailPilot beendet sich jetzt. Beim nächsten Start ersetzt die Sicherung die aktuelle Datenbank; der bisherige Stand bleibt im Sicherungsordner als „vor-wiederherstellung-…“ erhalten.")
+        }
+        .confirmationDialog("Einstellungen ersetzen?", isPresented: $confirmImport, titleVisibility: .visible) {
+            Button("Importieren", role: .destructive) { if let url = importURL { _ = engine.importSettings(from: url) } }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Alle aktuellen Einstellungen, Regeln, VIPs und Ausnahmen werden durch den Inhalt der Datei ersetzt.")
+        }
+    }
+
+    private func saveBackupAs() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = Backups.fileName()
+        panel.message = "Sicherung der MailPilot-Datenbank speichern"
+        if panel.runModal() == .OK, let url = panel.url { engine.backupNow(to: url) }
+    }
+
+    private func pickRestore() {
+        let panel = NSOpenPanel()
+        panel.directoryURL = Backups.folder
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Sicherung auswählen (.sqlite)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if let problem = Backups.validate(url) { restoreMessage = problem; return }
+        restoreMessage = nil
+        restoreURL = url
+        confirmRestore = true
+    }
+
+    private func exportJSON() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "MailPilot-Export-\(Deadlines.format(Date())).json"
+        if panel.runModal() == .OK, let url = panel.url { engine.exportJSON(to: url, includeBodies: includeBodies) }
+    }
+
+    private func exportThreadsCSV() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "Gespraeche-\(Deadlines.format(Date())).csv"
+        if panel.runModal() == .OK, let url = panel.url { engine.exportThreadsCSV(to: url) }
+    }
+
+    private func exportSettings() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "MailPilot-Einstellungen.json"
+        if panel.runModal() == .OK, let url = panel.url { engine.exportSettings(to: url) }
+    }
+
+    private func pickSettings() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        importURL = url
+        confirmImport = true
     }
 }

@@ -147,6 +147,7 @@ struct ThreadRow: View {
             if let until = thread.snoozedUntil, thread.isSnoozed {
                 Badge(text: "bis \(until.formatted(date: .abbreviated, time: .shortened))", color: CTW.accent, symbol: "moon.zzz.fill")
             }
+            if thread.isPrivate { Badge(text: "Vertraulich", color: CTW.teal700, symbol: "lock.shield.fill") }
             if thread.priority == .high { Badge(text: "Wichtig", color: CTW.action, symbol: "exclamationmark.2") }
             if let due = thread.dueDate { Badge(text: "Frist \(due)", color: CTW.accent, symbol: "calendar") }
             if let cat = thread.category {

@@ -66,7 +66,7 @@ extension Engine {
 
     /// Verarbeitet die nächsten Mails der Rechnungs-Kategorie (je Durchlauf nur wenige).
     func extractInvoices(limit: Int = 6) async {
-        guard settings.extractInvoices, initialComplete, !invoiceBusy, let claude else { return }
+        guard settings.extractInvoices, initialComplete, !invoiceBusy, let claude, UsageMonitor.shared.blockReason() == nil else { return }
         let queue = (try? store.invoiceQueue(category: settings.invoiceCategory, accounts: enabledAccountNames, limit: limit)) ?? []
         guard !queue.isEmpty else { return }
         invoiceBusy = true
@@ -84,7 +84,7 @@ extension Engine {
 
     /// Liest alle noch offenen Rechnungs-Mails aus (Knopf in der Rechnungsansicht).
     func extractAllInvoices() async {
-        guard !invoiceBusy, let claude else { if claude == nil { lastError = ClaudeError.notFound.localizedDescription }; return }
+        guard !invoiceBusy, let claude = claudeInteractive else { if claude == nil { lastError = ClaudeError.notFound.localizedDescription }; return }
         invoiceBusy = true
         defer { invoiceBusy = false; reload() }
         while true {
@@ -103,7 +103,7 @@ extension Engine {
     }
 
     func reextractInvoice(_ id: String) async {
-        guard !invoiceBusy, let claude, let m = try? store.message(id: id) else { return }
+        guard !invoiceBusy, let claude = claudeInteractive, let m = try? store.message(id: id), !m.isPrivate else { return }
         invoiceBusy = true
         defer { invoiceBusy = false; reload() }
         try? store.deleteInvoice(id)

@@ -262,3 +262,40 @@ extension Engine {
         all[.init(account: account, path: path)]
     }
 }
+
+/// Rückgängig für Flaggen
+extension Engine {
+    /// Einträge, deren Flagge sich zurücknehmen lässt (Zustand vor dem Setzen ist bekannt).
+    var undoableFlags: [ActivityEntry] { activity.filter(\.canUndoFlag) }
+
+    /// Setzt die Flaggen auf ihren früheren Zustand zurück – in einem Rutsch.
+    func undoFlags(_ entries: [ActivityEntry]) async {
+        let todo = entries.filter(\.canUndoFlag)
+        guard !todo.isEmpty else { return }
+        var items: [MailBridge.BatchItem] = []
+        var byId: [String: ActivityEntry] = [:]
+        for e in todo {
+            guard let prev = e.previousFlag, let m = try? store.message(id: e.messageId) else { continue }
+            items.append(.init(messageId: m.messageId, location: .init(account: m.account, mailbox: m.mailbox, mailId: m.mailId),
+                               target: nil, flag: nil, restoreFlag: prev))
+            byId[m.messageId] = e
+        }
+        guard !items.isEmpty else { return }
+        do {
+            var restored = 0
+            for chunk in stride(from: 0, to: items.count, by: 50).map({ Array(items[$0..<min($0 + 50, items.count)]) }) {
+                status = "Flaggen zurücknehmen: \(restored)/\(items.count)"
+                for (item, r) in zip(chunk, try await bridge.batch(chunk)) {
+                    guard r.ok, let e = byId[item.messageId], let m = try? store.message(id: e.messageId) else { continue }
+                    try store.markUndone(e.id)
+                    store.log(m, kind: "undo", detail: item.restoreFlag?.flagged == true ? "Flagge auf früheren Stand zurückgesetzt" : "Flagge entfernt", dryRun: false)
+                    restored += 1
+                }
+            }
+            status = "\(restored) Flaggen zurückgenommen"
+            reload()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+}

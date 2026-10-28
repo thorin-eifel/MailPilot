@@ -51,8 +51,9 @@ final class MailBridge: @unchecked Sendable {
 
     /// Liest neue Nachrichten aus den Posteingängen (und ggf. Gesendet) der angegebenen Konten.
     func fetch(since: Date, sentSince: Date? = nil, accounts: [String], known: [String], maxNew: Int, includeSent: Bool,
-               contentLimit: Int = 6000) async throws -> FetchResult {
+               contentLimit: Int = 6000, inbox: Bool = true) async throws -> FetchResult {
         let params: [String: Any] = [
+            "inbox": inbox,
             "accounts": accounts,
             "since": since.isoString,
             "sentSince": (sentSince ?? since).isoString,
@@ -92,6 +93,8 @@ final class MailBridge: @unchecked Sendable {
         var location: Location
         var target: String?
         var flag: FlagColor?
+        /// Flagge auf diesen früheren Zustand zurücksetzen (Rückgängig).
+        var restoreFlag: (flagged: Bool, index: Int)?
     }
 
     struct BatchResult: Decodable {
@@ -102,6 +105,9 @@ final class MailBridge: @unchecked Sendable {
         var mailbox: String?
         /// Nur bei verschobenen Mails: im Zielordner wiedergefunden? `false` = nicht zurücklesbar.
         var verified: Bool?
+        /// Zustand der Flagge vor dem Setzen (für „Rückgängig“).
+        var prevFlagged: Bool?
+        var prevFlagIndex: Int?
     }
 
     /// Spezielles Verschiebeziel: der Posteingang des jeweiligen Kontos.
@@ -160,6 +166,7 @@ final class MailBridge: @unchecked Sendable {
                                     "mailbox": it.location.mailbox, "id": it.location.mailId]
             if let t = it.target { d["target"] = t }
             if let f = it.flag { d["flagIndex"] = f.rawValue }
+            if let r = it.restoreFlag { d["restore"] = ["flagged": r.flagged, "index": r.index] }
             return d
         }
         let out = try await run(batchScript, ["items": list])
@@ -212,11 +219,13 @@ final class MailBridge: @unchecked Sendable {
       const idsIn = s => s ? (s.match(/<[^>]+>/g) || []).map(x => x.slice(1, -1)) : [];
       function headers(m) {
         let h = '';
-        try { h = m.allHeaders() || ''; } catch (e) { return { irt: null, refs: [] }; }
+        try { h = m.allHeaders() || ''; } catch (e) { return { irt: null, refs: [], unsub: null, post: null }; }
         h = h.replace(/\r?\n[ \t]+/g, ' ');
         const irt = (h.match(/^In-Reply-To:\s*(.*)$/mi) || [])[1];
         const refs = (h.match(/^References:\s*(.*)$/mi) || [])[1];
-        return { irt: idsIn(irt)[0] || null, refs: idsIn(refs) };
+        const unsub = (h.match(/^List-Unsubscribe:\s*(.*)$/mi) || [])[1];
+        const post = (h.match(/^List-Unsubscribe-Post:\s*(.*)$/mi) || [])[1];
+        return { irt: idsIn(irt)[0] || null, refs: idsIn(refs), unsub: unsub || null, post: post || null };
       }
 
       function collect(coll, isSent) {
@@ -251,6 +260,8 @@ final class MailBridge: @unchecked Sendable {
               read: m.readStatus(),
               inReplyTo: h.irt,
               references: h.refs,
+              unsubscribe: h.unsub,
+              unsubscribePost: h.post,
               to: m.toRecipients.address(),
               cc: m.ccRecipients.address(),
               content: content.slice(0, p.contentLimit),
@@ -266,7 +277,7 @@ final class MailBridge: @unchecked Sendable {
       const accountOf = mb => { try { return mb.account().name(); } catch (e) { return ''; } };
       // Beim Vollscan ohne Datumsfilter lesen: „whose“ über Tausende Mails läuft in einen AppleEvent-Timeout.
       const fullScan = since.getFullYear() < 1980;
-      for (const mb of Mail.inbox.mailboxes()) {
+      for (const mb of (p.inbox === false ? [] : Mail.inbox.mailboxes())) {
         if (!wanted[accountOf(mb)]) continue;
         collect(fullScan ? mb.messages : mb.messages.whose({ dateReceived: { _greaterThan: since } }), false);
       }
@@ -428,7 +439,17 @@ final class MailBridge: @unchecked Sendable {
         try {
           const acct = Mail.accounts.byName(it.account);
           const m = find(acct, it);
-          if (it.flagIndex !== undefined) { m.flaggedStatus = true; m.flagIndex = it.flagIndex; }
+          if (it.restore !== undefined) {
+            // Rückgängig: Flagge auf den früheren Zustand zurücksetzen.
+            m.flaggedStatus = it.restore.flagged;
+            if (it.restore.flagged && it.restore.index >= 0) m.flagIndex = it.restore.index;
+          }
+          if (it.flagIndex !== undefined) {
+            // Früheren Zustand merken, damit sich die Flagge zurücknehmen lässt.
+            try { r.prevFlagged = m.flaggedStatus(); r.prevFlagIndex = m.flagIndex(); } catch (e) {}
+            m.flaggedStatus = true;
+            m.flagIndex = it.flagIndex;
+          }
           if (it.target) {
             const dest = ensureMailbox(acct, it.account, it.target);
             Mail.move(m, { to: dest });

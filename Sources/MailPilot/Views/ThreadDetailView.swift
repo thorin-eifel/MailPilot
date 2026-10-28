@@ -10,6 +10,7 @@ struct ThreadDetailView: View {
     @ViewState private var ruleDraft: UserRule?
     @ViewState private var showSnoozePicker = false
     @ViewState private var showDuePicker = false
+    @ViewState private var confirmExclude = false
 
     private var sender: StoredMessage? { messages.last(where: { !$0.isFromMe }) }
     private var senderIsVIP: Bool { sender.map { engine.isVIP($0.senderEmail) } ?? false }
@@ -66,52 +67,64 @@ struct ThreadDetailView: View {
                 }
                 .ctwCard()
 
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Eyebrow(text: thread.isFollowUpCase ? "Nachfass-Entwurf" : "Antwortentwurf", number: "02")
-                        Spacer()
-                        if working { ProgressView().controlSize(.small) }
-                    }
-                    TextEditor(text: $draft)
-                        .font(.body)
-                        .foregroundStyle(CTW.ink)
-                        .frame(minHeight: 170)
-                        .scrollContentBackground(.hidden)
-                        .padding(8)
-                        .background(CTW.surfaceSoft, in: RoundedRectangle(cornerRadius: CTW.radius))
-                        .overlay(RoundedRectangle(cornerRadius: CTW.radius).strokeBorder(CTW.line))
-                    HStack(spacing: 8) {
-                        Image(systemName: "sparkles").foregroundStyle(CTW.accent)
-                        TextField("Anweisung an Claude, z. B. „kürzer, Termin Dienstag vorschlagen“", text: $hint)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit(redraft)
-                        Button(action: redraft) {
-                            Label(draft.isEmpty ? (thread.isFollowUpCase ? "Nachfass-Entwurf erstellen" : "Entwurf erstellen") : "Neu schreiben",
-                                  systemImage: "wand.and.stars")
+                if thread.isPrivate {
+                    HStack(alignment: .top, spacing: 12) {
+                        IconTile(symbol: "lock.shield.fill", color: CTW.accent, size: 34)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Vertraulich – nicht an Claude gesendet").fontWeight(.semibold).foregroundStyle(CTW.ink)
+                            Text("Für dieses Gespräch gilt eine Datenschutz-Ausnahme: Inhalt, Betreff und Absender gehen nie an Claude. Es gibt keine Zusammenfassung, keinen Entwurf und keine Frist. Antworten kannst du direkt in Mail.")
+                                .font(.callout).foregroundStyle(CTW.muted)
                         }
-                        .buttonStyle(.ctwSecondary)
-                        .disabled(working)
                     }
-                    HStack(spacing: 8) {
-                        Label("Gesendet wird erst, wenn du in Mail auf Senden klickst.", systemImage: "hand.raised.fill")
-                            .font(.caption).foregroundStyle(CTW.muted)
-                        Spacer()
-                        Button { engine.saveDraft(draft, for: thread) } label: {
-                            Label("Speichern", systemImage: "square.and.arrow.down")
+                    .ctwCard()
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Eyebrow(text: thread.isFollowUpCase ? "Nachfass-Entwurf" : "Antwortentwurf", number: "02")
+                            Spacer()
+                            if working { ProgressView().controlSize(.small) }
                         }
-                        .buttonStyle(.ctwSecondary)
-                        .disabled(draft == (thread.draft ?? ""))
-                        Button {
-                            engine.saveDraft(draft, for: thread)
-                            Task { await engine.openReply(for: thread, text: draft) }
-                        } label: {
-                            Label("In Mail öffnen", systemImage: "arrowshape.turn.up.left.fill")
+                        TextEditor(text: $draft)
+                            .font(.body)
+                            .foregroundStyle(CTW.ink)
+                            .frame(minHeight: 170)
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .background(CTW.surfaceSoft, in: RoundedRectangle(cornerRadius: CTW.radius))
+                            .overlay(RoundedRectangle(cornerRadius: CTW.radius).strokeBorder(CTW.line))
+                        HStack(spacing: 8) {
+                            Image(systemName: "sparkles").foregroundStyle(CTW.accent)
+                            TextField("Anweisung an Claude, z. B. „kürzer, Termin Dienstag vorschlagen“", text: $hint)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit(redraft)
+                            Button(action: redraft) {
+                                Label(draft.isEmpty ? (thread.isFollowUpCase ? "Nachfass-Entwurf erstellen" : "Entwurf erstellen") : "Neu schreiben",
+                                      systemImage: "wand.and.stars")
+                            }
+                            .buttonStyle(.ctwSecondary)
+                            .disabled(working)
                         }
-                        .buttonStyle(.ctwPrimary)
-                        .disabled(draft.isEmpty)
+                        HStack(spacing: 8) {
+                            Label("Gesendet wird erst, wenn du in Mail auf Senden klickst.", systemImage: "hand.raised.fill")
+                                .font(.caption).foregroundStyle(CTW.muted)
+                            Spacer()
+                            Button { engine.saveDraft(draft, for: thread) } label: {
+                                Label("Speichern", systemImage: "square.and.arrow.down")
+                            }
+                            .buttonStyle(.ctwSecondary)
+                            .disabled(draft == (thread.draft ?? ""))
+                            Button {
+                                engine.saveDraft(draft, for: thread)
+                                Task { await engine.openReply(for: thread, text: draft) }
+                            } label: {
+                                Label("In Mail öffnen", systemImage: "arrowshape.turn.up.left.fill")
+                            }
+                            .buttonStyle(.ctwPrimary)
+                            .disabled(draft.isEmpty)
+                        }
                     }
+                    .ctwCard()
                 }
-                .ctwCard()
 
                 VStack(alignment: .leading, spacing: 4) {
                     Eyebrow(text: "Verlauf · \(messages.count) Nachrichten", number: "03")
@@ -131,6 +144,14 @@ struct ThreadDetailView: View {
             messages = engine.messages(in: thread)
         }
         .sheet(item: $ruleDraft) { RuleEditorSheet(rule: $0).environmentObject(engine) }
+        .confirmationDialog("Absender von Claude ausschließen?", isPresented: $confirmExclude, titleVisibility: .visible) {
+            Button("Ausschließen und Inhalte entfernen", role: .destructive) {
+                if let s = sender { engine.excludeSender(s.senderEmail, name: s.senderName) }
+            }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Mails von und an \(sender?.senderEmail ?? "") gehen künftig nie mehr an Claude. Bereits gespeicherte Mailtexte und Zusammenfassungen dieses Absenders werden von diesem Rechner gelöscht.")
+        }
         .sheet(isPresented: $showDuePicker) {
             DueDatePickerSheet(initial: Deadlines.parse(thread.dueDate)) { engine.setDueDate(thread, to: $0) }
         }
@@ -143,6 +164,7 @@ struct ThreadDetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Badge(text: thread.status.label, color: thread.status.color, symbol: thread.status.symbol)
+                if thread.isPrivate { Badge(text: "Vertraulich", color: CTW.teal700, symbol: "lock.shield.fill") }
                 if senderIsVIP { Badge(text: "VIP", color: CTW.action, symbol: "star.fill") }
                 if thread.priority == .high { Badge(text: "Wichtig", color: CTW.action, symbol: "exclamationmark.2") }
                 if let cat = thread.category {
@@ -199,6 +221,10 @@ struct ThreadDetailView: View {
                         }
                         Button { ruleDraft = ruleDraft(for: s, domain: true) } label: {
                             Label("Regel für die Domain …", systemImage: "globe")
+                        }
+                        Divider()
+                        Button { confirmExclude = true } label: {
+                            Label("Von Claude ausschließen …", systemImage: "lock.shield")
                         }
                     }
                 } label: {

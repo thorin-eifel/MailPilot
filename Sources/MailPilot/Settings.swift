@@ -52,6 +52,40 @@ enum DeadlineKind: String {
     case reminder, calendar
 }
 
+/// Ausnahme vom Datenschutz: Passende Mails (und ihre Gespräche) werden nie an Claude gesendet.
+struct PrivacyRule: Codable, Hashable, Identifiable {
+    var id = UUID()
+    var name = "Ausnahme"
+    var enabled = true
+    /// false = eine Bedingung genügt.
+    var matchAll = false
+    var conditions: [RuleCondition] = [RuleCondition()]
+    /// false = der Mailtext wird gar nicht erst gespeichert.
+    var keepBody = false
+
+    /// Absender- und Domain-Bedingungen gelten bei gesendeten Mails für die Empfänger.
+    func matches(_ m: StoredMessage) -> Bool {
+        guard enabled else { return false }
+        let active = conditions.filter { !$0.value.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard !active.isEmpty else { return false }
+        let hits = active.map { c -> Bool in
+            guard m.isFromMe, c.field == .sender || c.field == .domain else { return RuleEngine.matches(c, m) }
+            let v = c.value.trimmingCharacters(in: .whitespaces).lowercased()
+            return m.recipients.map { MailAddress.parse($0).email }.contains { email in
+                c.field == .sender ? email.contains(v) : RuleEngine.domainMatches(domain: RuleEngine.domain(of: email),
+                                                                                  want: v.hasPrefix("@") ? String(v.dropFirst()) : v)
+            }
+        }
+        return matchAll ? !hits.contains(false) : hits.contains(true)
+    }
+}
+
+enum PrivacyPolicy {
+    static func rule(for m: StoredMessage, settings: AppSettings) -> PrivacyRule? {
+        settings.privacyRules.first { $0.matches(m) }
+    }
+}
+
 struct AppSettings: Codable, Equatable {
     var pollMinutes = 5
     var lookbackDays = 3
@@ -92,9 +126,26 @@ struct AppSettings: Codable, Equatable {
     /// Rechnungen aus Mails der Kategorie `invoiceCategory` samt PDF-Anhang auslesen.
     var extractInvoices = true
     var invoiceCategory = "Rechnungen"
+    /// Ausnahmen: Inhalt dieser Mails geht nie an Claude.
+    var privacyRules: [PrivacyRule] = []
+    /// Automatische Claude-Aufrufe pausieren, wenn das Abo-Limit fast erreicht ist.
+    /// Entwürfe im gelernten Stil des Nutzers schreiben.
+    var useStyleProfile = true
+    /// Tägliche Sicherung der Datenbank; die letzten `backupKeep` bleiben.
+    var autoBackup = true
+    var backupKeep = 7
+    var limitGuardEnabled = true
+    var fiveHourPause = 0.9
+    var sevenDayPause = 0.9
+    /// 0 = unbegrenzt
+    var maxCallsPerDay = 0
 
     func isEnabled(_ account: String) -> Bool {
         enabledAccounts.map { $0.contains(account) } ?? true
+    }
+
+    var usageGuard: UsageGuardSettings {
+        UsageGuardSettings(enabled: limitGuardEnabled, fiveHourLimit: fiveHourPause, sevenDayLimit: sevenDayPause, maxCallsPerDay: maxCallsPerDay)
     }
 
     func category(named name: String?) -> CategoryRule? {
@@ -179,5 +230,13 @@ extension AppSettings {
         calendarName = v(.calendarName, calendarName)
         extractInvoices = v(.extractInvoices, extractInvoices)
         invoiceCategory = v(.invoiceCategory, invoiceCategory)
+        privacyRules = v(.privacyRules, privacyRules)
+        useStyleProfile = v(.useStyleProfile, useStyleProfile)
+        autoBackup = v(.autoBackup, autoBackup)
+        backupKeep = v(.backupKeep, backupKeep)
+        limitGuardEnabled = v(.limitGuardEnabled, limitGuardEnabled)
+        fiveHourPause = v(.fiveHourPause, fiveHourPause)
+        sevenDayPause = v(.sevenDayPause, sevenDayPause)
+        maxCallsPerDay = v(.maxCallsPerDay, maxCallsPerDay)
     }
 }
