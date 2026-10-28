@@ -31,6 +31,8 @@ Menüleisten-App mit Dashboard, die Apple Mail mit Claude automatisiert:
 - **Antwortentwürfe** – werden automatisch vorbereitet, lassen sich mit einer Anweisung neu schreiben und öffnen sich als Antwortfenster in Mail. **Gesendet wird nie automatisch.**
 - **Aktivitätsprotokoll** mit Rückgängig für Verschiebungen, plus Probelauf-Modus.
 
+Ausführliche Anleitung: [Benutzerhandbuch](docs/Benutzerhandbuch.md)
+
 ## Voraussetzungen
 
 - macOS 15 oder neuer, Apple Mail mit eingerichteten Konten
@@ -86,7 +88,7 @@ Daten liegen lokal in `~/Library/Application Support/MailPilot/`. Mailinhalte we
 
 ## Sicherheitsgrenzen
 
-- Mails, die **vor dem ersten Start** eingegangen sind, werden analysiert, aber nicht verschoben.
+- Der Erstscan sortiert auch ältere Mails ein, aber nur in Konten mit nachgewiesen lesbaren Zielordnern bzw. ausdrücklich erlaubter Probe-Verschiebung; Flaggen setzt er nur bei Mails der letzten 14 Tage.
 - Gmail-Mails (Ordner „Alle Nachrichten“) werden nur markiert, nicht verschoben.
 - Ordner werden nie gelöscht, Mails nie gelöscht oder gesendet.
 
