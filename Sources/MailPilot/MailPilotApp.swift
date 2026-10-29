@@ -83,6 +83,7 @@ struct MailPilotApp: App {
                 .environmentObject(engine)
                 .frame(minWidth: 1050, minHeight: 620)
         }
+        .defaultSize(width: 1800, height: 1100)
         .defaultLaunchBehavior(.presented)
         .commands {
             CommandMenu("Gespräch") {
@@ -190,6 +191,7 @@ enum RenderPreview {
             engine.reload()
             engine.loadPreviewSamples()
             Planner.shared.loadPreviewSamples()
+            ClientModel.shared.reloadFolders()
             let out = URL(fileURLWithPath: dir)
             try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
             let thread = engine.threads.first { $0.draft != nil } ?? engine.threads.first { $0.messageCount > 1 } ?? engine.threads.first
@@ -200,6 +202,7 @@ enum RenderPreview {
                 render(DashboardView(initial: .mailbox), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("mailbox-\(suffix).png"))
                 render(DashboardView(initial: .calendar), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("calendar-\(suffix).png"))
                 render(DashboardView(initial: .reminders), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("reminders-\(suffix).png"))
+                render(DashboardView(initial: .briefing), size: NSSize(width: 2400, height: 1300), dark: dark, to: out.appendingPathComponent("briefing-wide-\(suffix).png"))
                 render(DashboardView(initial: .briefing), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("briefing-\(suffix).png"))
                 render(DashboardView(initial: .rules), size: NSSize(width: 1240, height: 1500), dark: dark, to: out.appendingPathComponent("rules-\(suffix).png"))
                 render(DashboardView(initial: .invoices), size: NSSize(width: 1240, height: 760), dark: dark, to: out.appendingPathComponent("invoices-\(suffix).png"))

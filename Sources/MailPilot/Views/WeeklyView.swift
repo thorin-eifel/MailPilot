@@ -34,7 +34,7 @@ struct WeeklyView: View {
                 }
             }
             .padding(24)
-            .frame(maxWidth: 900, alignment: .leading)
+            .frame(maxWidth: 1500, alignment: .leading)
         }
         .background(CTW.bg)
     }

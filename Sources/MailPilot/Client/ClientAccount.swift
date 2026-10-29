@@ -56,6 +56,23 @@ struct ClientAccount: Codable, Identifiable, Hashable {
     var smtpConfig: SMTPConfig { SMTPConfig(host: smtpHost, port: smtpPort, security: smtpSecurity) }
 }
 
+extension ClientAccount {
+    /// Beim Kopieren von appleid.apple.com kommen oft typografische Bindestriche (‑ – −) oder unsichtbare Zeichen mit.
+    /// Die werden zu „-“ bzw. entfernt; echte Sonderzeichen bleiben stehen und werden vom Client gemeldet.
+    static func normalizedPassword(_ raw: String) -> String {
+        let dashes: Set<UInt32> = [0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, 0xFE63, 0xFF0D, 0x00AD]
+        var out = String.UnicodeScalarView()
+        for u in raw.unicodeScalars {
+            if dashes.contains(u.value) { out.append("-"); continue }
+            switch u.properties.generalCategory {
+            case .format, .spaceSeparator, .lineSeparator, .paragraphSeparator, .control: continue   // Zero-Width, Leerzeichen, Umbrüche
+            default: out.append(u)
+            }
+        }
+        return String(out)
+    }
+}
+
 enum Keychain {
     private static let service = "de.thorin.mailpilot.imap"
 

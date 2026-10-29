@@ -39,6 +39,11 @@ struct ClientFolder: Identifiable, Hashable {
 
     var id: String { "\(account)|\(path)" }
 
+    private var parts: [Substring] { delimiter.isEmpty ? [Substring(path)] : path.split(separator: Character(delimiter), omittingEmptySubsequences: true) }
+    /// Tiefe im Ordnerbaum (0 = oberste Ebene) und der Name ohne Elternpfad.
+    var depth: Int { max(parts.count - 1, 0) }
+    var leafName: String { parts.last.map(String.init) ?? name }
+
     var sortRank: Int {
         switch special {
         case "inbox": 0
@@ -65,6 +70,19 @@ struct ClientFolder: Identifiable, Hashable {
 }
 
 extension Store {
+    /// Claudes Ergebnis (Kategorie, Priorität, Zusammenfassung, Gespräch) für eine Reihe von Nachrichten – nur Analysierte.
+    func analyses(messageIds: [String]) -> [String: StoredMessage] {
+        var out: [String: StoredMessage] = [:]
+        for chunk in stride(from: 0, to: messageIds.count, by: 400).map({ Array(messageIds[$0..<min($0 + 400, messageIds.count)]) }) {
+            let marks = chunk.map { _ in "?" }.joined(separator: ",")
+            for r in (try? db.query("SELECT * FROM messages WHERE processed = 1 AND message_id IN (\(marks))", chunk)) ?? [] {
+                let m = message(r)
+                out[m.messageId] = m
+            }
+        }
+        return out
+    }
+
     func clientFolders(account: String) -> [ClientFolder] {
         let unread = Dictionary(uniqueKeysWithValues: ((try? db.query("""
             SELECT folder, COUNT(*) AS n FROM c_message WHERE account = ? AND flags NOT LIKE '%\\Seen%' GROUP BY folder

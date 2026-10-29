@@ -10,6 +10,11 @@ final class ClientModel: ObservableObject {
     @Published var selectedFolder: ClientFolder?
     @Published private(set) var messages: [ClientMessage] = []
     @Published var selectedMessageID: String?
+    /// Von der Seitenleiste ausgelöst: Konto-hinzufügen-Blatt und Rückfrage vor dem Einschalten von Claude.
+    @Published var addingAccount = false
+    @Published var confirmEnable: ClientAccount?
+    /// Claudes Ergebnisse zu den Nachrichten der Liste (nach Message-ID); leer, solange das Konto nicht freigegeben ist.
+    @Published private(set) var analysis: [String: StoredMessage] = [:]
     @Published private(set) var opened: ParsedMessage?
     @Published private(set) var openedHeader: MailHeaderInfo?
     @Published private(set) var busy = false
@@ -25,6 +30,14 @@ final class ClientModel: ObservableObject {
     private var store: Store { engine.store }
     var accounts: [ClientAccount] { engine.settings.clientAccounts }
 
+    func reloadAnalysis() {
+        analysis = store.analyses(messageIds: messages.map(\.messageId))
+    }
+
+    func thread(for messageId: String) -> MailThread? {
+        analysis[messageId]?.threadKey.flatMap { try? store.thread($0) }
+    }
+
     private func key(_ a: ClientAccount) -> String { a.id.uuidString }
 
     // MARK: Konten
@@ -32,6 +45,8 @@ final class ClientModel: ObservableObject {
     /// Konto prüfen (Verbindung und Anmeldung) und speichern. Rückgabe: Fehlertext oder `nil`.
     func addAccount(_ account: ClientAccount, password: String) async -> String? {
         var account = account
+        // Typografische Striche und unsichtbare Zeichen stören nur beim kopierten iCloud-Passwort; andere Passwörter bleiben unverändert.
+        let password = account.isICloud ? ClientAccount.normalizedPassword(password) : password.trimmingCharacters(in: .whitespacesAndNewlines)
         let client = IMAPClient(.init(host: account.host, port: account.port))
         var lastError: String?
         for name in account.loginCandidates {

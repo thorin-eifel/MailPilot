@@ -29,6 +29,7 @@ enum SelfTest2 {
             try flagTests(tmp)
             try backupTests(tmp)
             plannerTests()
+            try analysisLookupTests(tmp)
             try exportTests(tmp)
             try prefilterTests(tmp)
             try latestTests(tmp)

@@ -62,6 +62,9 @@ extension SelfTest2 {
               && PlannerLogic.dueText(rem("x", due: d(2026, 10, 27), time: false), now: now, calendar: cal) == "Morgen"
               && PlannerLogic.dueText(rem("x", due: d(2026, 11, 3, 9)), now: now, calendar: cal).hasSuffix("09:00"), "Erinnerungen: Fälligkeitstext")
 
+        let parts = BriefingView.sections("Einleitung\n\n# Eins\n- a\n\n## Zwei\n- b\n# Drei")
+        check(parts == ["Einleitung", "# Eins\n- a", "## Zwei\n- b", "# Drei"] && BriefingView.sections("").isEmpty && BriefingView.sections("# Nur").count == 1, "Briefing: Abschnitte an Überschriften")
+
         // Vorlagen und Verweise
         check(PlannerDraft.defaultDate(due: "2026-12-24", now: now, calendar: cal) == d(2026, 12, 24, 9)
               && PlannerDraft.defaultDate(due: "2026-01-01", now: now, calendar: cal) == d(2026, 10, 27, 9)
@@ -72,5 +75,17 @@ extension SelfTest2 {
         check(apple?.scheme == "message" && apple.flatMap(PlannerDraft.messageId(fromLink:)) == nil, "Verweis: Apple-Mail-Mails bleiben bei message://")
         let draft = PlannerDraft.from(subject: "", sender: "Anna", date: now, link: link, kind: .reminder)
         check(draft.title == "Mail von Anna" && draft.notes.contains("mailpilot://message/") && draft.url == link, "Vorlage: Titel und Notiz aus der Mail")
+    }
+
+    /// Claudes Ergebnisse für die Liste des eigenen Postfachs.
+    static func analysisLookupTests(_ tmp: URL) throws {
+        let store = try Store(path: tmp.appendingPathComponent("lookup.sqlite"))
+        try store.insert(raw("a1", subject: "Rechnung"), myAddresses: [])
+        try store.insert(raw("a2", subject: "Unbearbeitet"), myAddresses: [])
+        try store.saveAnalysis(of: "a1", threadKey: "t1", category: "Rechnungen", priority: .high, summary: "Rechnung über 40 €")
+        let found = store.analyses(messageIds: ["a1", "a2", "fehlt"])
+        check(found.count == 1 && found["a1"]?.category == "Rechnungen" && found["a1"]?.priority == .high && found["a1"]?.threadKey == "t1",
+              "Postfach: nur analysierte Mails bekommen Claude-Ergebnisse")
+        check(store.analyses(messageIds: []).isEmpty, "Postfach: leere Liste")
     }
 }

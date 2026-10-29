@@ -188,6 +188,11 @@ enum ClientSelfTest {
         let caps = await client.capabilities
         check(caps.contains("IMAP4REV1"), "Server: Fähigkeiten gelesen")
 
+        check(ClientAccount.normalizedPassword("abcd\u{2011}efgh\u{2013}ijkl \u{200B}mnop\n") == "abcd-efgh-ijklmnop" && ClientAccount.normalizedPassword("ab-cd") == "ab-cd"
+              && ClientAccount.normalizedPassword("pä\u{00DF}") == "pä\u{00DF}", "Passwort: typografische Bindestriche und unsichtbare Zeichen werden bereinigt")
+        let presets = MailProvider.all.filter { !$0.isCustom }
+        check(presets.count >= 7 && presets.allSatisfy { !$0.smtpHost.isEmpty && $0.smtpSecurity != .none && [465, 587].contains($0.smtpPort) }
+              && MailProvider.all.last?.isCustom == true && presets.first?.imapHost == ClientAccount.iCloudHost, "Anbieter-Vorgaben: IMAP und SMTP vollständig, verschlüsselt")
         do { try await client.login(user: "anna", password: "falsch"); check(false, "Server: falsches Passwort wird abgelehnt") }
         catch IMAPError.auth { check(true, "Server: falsches Passwort wird abgelehnt") }
         try await client.login(user: "anna", password: "secret")

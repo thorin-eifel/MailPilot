@@ -55,7 +55,7 @@ struct DashboardView: View {
     @ObservedObject private var planner = Planner.shared
     @ViewState private var selection: SidebarItem?
 
-    init(initial: SidebarItem = .needsReply) {
+    init(initial: SidebarItem = .briefing) {
         _selection = ViewState(initialValue: initial)
     }
 
@@ -64,11 +64,14 @@ struct DashboardView: View {
             // Navigation = Glas (System-Seitenleiste), Inhalte = deckende Flächen.
             List(selection: $selection) {
                 Section {
+                    row(.briefing, count: nil)
+                }
+                Section {
                     row(.mailbox, count: nil)
+                    if selection == .mailbox { MailboxSidebarTree { selection = .mailbox } }
                     row(.calendar, count: nil)
                     row(.reminders, count: planner.overdueCount)
                     row(.search, count: nil)
-                    row(.briefing, count: nil)
                     row(.weekly, count: nil)
                 }
                 Section {
@@ -109,7 +112,7 @@ struct DashboardView: View {
         } detail: {
             ZStack {
                 CTW.bg.ignoresSafeArea()
-                switch selection ?? .needsReply {
+                switch selection ?? .briefing {
                 case .mailbox: MailboxView()
                 case .calendar: CalendarView()
                 case .reminders: RemindersView()
