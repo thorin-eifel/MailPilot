@@ -139,7 +139,7 @@ extension Engine {
 extension Engine {
     /// Fragt die aktuelle Abo-Auslastung mit einem winzigen Aufruf ab.
     func refreshPlanLimits() async {
-        guard let path = ClaudeClient.locate(preferred: settings.claudePath) else { lastError = ClaudeError.notFound.localizedDescription; return }
+        guard settings.useClaude, let path = ClaudeClient.locate(preferred: settings.claudePath) else { lastError = claudeUnavailableMessage; return }
         var c = ClaudeClient(executable: path, model: "haiku")
         c.interactive = true
         do { _ = try await c.tagged("Limit-Abfrage").ping() } catch { lastError = error.localizedDescription }

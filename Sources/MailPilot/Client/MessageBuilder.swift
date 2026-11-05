@@ -15,6 +15,8 @@ struct OutgoingMessage {
     var bcc: [String] = []
     var subject = ""
     var body = ""
+    /// Formatierte Fassung; mit ihr wird die Nachricht als „multipart/alternative“ (Text + HTML) gebaut.
+    var html: String?
     var inReplyTo: String?
     var references: [String] = []
     var attachments: [OutgoingAttachment] = []
@@ -180,7 +182,16 @@ enum MessageBuilder {
         head.append("MIME-Version: 1.0")
         head.append("X-Mailer: MailPilot")
 
-        let textPart = "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n" + quotedPrintable(m.body)
+        let plainPart = "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n" + quotedPrintable(m.body)
+        var textPart = plainPart
+        if let html = m.html, !html.isEmpty {
+            let alt = "=_MailPilotAlt_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+            let htmlDoc = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"></head><body>\n\(html)\n</body></html>"
+            textPart = "Content-Type: multipart/alternative; boundary=\"\(alt)\"\r\n\r\n"
+                + "--\(alt)\r\n" + plainPart + "\r\n"
+                + "--\(alt)\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n" + quotedPrintable(htmlDoc) + "\r\n"
+                + "--\(alt)--"
+        }
         var out: String
         if m.attachments.isEmpty {
             out = head.joined(separator: "\r\n") + "\r\n" + textPart + "\r\n"

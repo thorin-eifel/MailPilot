@@ -26,17 +26,22 @@ extension Engine {
 
     // MARK: Abgleich und Einlesen
 
-    /// Gleicht die angegebenen IMAP-Konten mit dem Server ab. Fehler eines Kontos werden gemeldet und stoppen die anderen nicht.
+    /// Gleicht die angegebenen IMAP-Konten mit dem Server ab, bis zu `parallelSyncs` gleichzeitig.
+    /// Fehler eines Kontos werden gemeldet und stoppen die anderen nicht.
     func syncClientAccounts(_ names: [String]) async {
-        for name in names {
-            guard let account = clientAccount(named: name) else { continue }
+        let accounts = names.compactMap { clientAccount(named: $0) }
+        let store = self.store
+        let prefix = settings.folderPrefix, includeSent = settings.includeSent
+        let inboxLimit = settings.initialScanDays == 0 ? 20_000 : 3_000
+        await forEachConcurrently(accounts, limit: ClientModel.parallelSyncs) { account in
             do {
                 let client = try await ClientModel.shared.connectedClient(account)
-                try await ClientBackend.sync(store: store, client: client, account: account, prefix: settings.folderPrefix, includeSent: settings.includeSent,
-                                             inboxLimit: settings.initialScanDays == 0 ? 20_000 : 3_000)
+                try await ClientBackend.sync(store: store, client: client, account: account, prefix: prefix, includeSent: includeSent, inboxLimit: inboxLimit)
             } catch {
-                lastError = "\(account.name): \(error.localizedDescription)"
-                ClientModel.shared.dropClient(account)
+                await MainActor.run {
+                    Engine.shared.lastError = "\(account.name): \(error.localizedDescription)"
+                    ClientModel.shared.dropClient(account)
+                }
             }
         }
     }

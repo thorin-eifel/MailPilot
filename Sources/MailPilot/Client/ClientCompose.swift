@@ -19,6 +19,10 @@ struct ComposeDraft: Identifiable {
     var bcc = ""
     var subject = ""
     var body = ""
+    /// Formatierte Fassung (HTML), nur wenn der Text Formatierung enthält.
+    var html: String?
+    /// Signatur, die zuletzt in den Text eingesetzt wurde (`nil` = noch nicht eingesetzt).
+    var appliedSignature: String?
     var attachments: [OutgoingAttachment] = []
     var inReplyTo: String?
     var references: [String] = []
@@ -82,7 +86,7 @@ struct ComposeDraft: Identifiable {
     func outgoing(from account: ClientAccount) -> OutgoingMessage {
         OutgoingMessage(fromName: account.displayName, fromEmail: account.email,
                         to: to.isEmpty ? [] : [to], cc: cc.isEmpty ? [] : [cc], bcc: bcc.isEmpty ? [] : [bcc],
-                        subject: subject, body: body, inReplyTo: inReplyTo, references: references, attachments: attachments)
+                        subject: subject, body: body, html: html, inReplyTo: inReplyTo, references: references, attachments: attachments)
     }
 }
 

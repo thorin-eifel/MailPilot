@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Network
 
@@ -47,6 +48,10 @@ enum ClientSelfTest {
         codecTests()
         composeTests()
         backendPureTests()
+        accountLimitTests()
+        externalOpenTests()
+        searchQueryTests()
+        composeRichTests()
         let sema = DispatchSemaphore(value: 0)
         Task.detached {
             do {
@@ -54,6 +59,9 @@ enum ClientSelfTest {
                 try await serverTests()
                 try await smtpTests()
                 try await backendTests()
+                try await manyAccountsTests()
+                try searchStoreTests()
+                await concurrencyTests()
             } catch {
                 check(false, "Tests liefen ohne Fehler: \(error)")
             }
@@ -190,9 +198,9 @@ enum ClientSelfTest {
 
         check(ClientAccount.normalizedPassword("abcd\u{2011}efgh\u{2013}ijkl \u{200B}mnop\n") == "abcd-efgh-ijklmnop" && ClientAccount.normalizedPassword("ab-cd") == "ab-cd"
               && ClientAccount.normalizedPassword("pä\u{00DF}") == "pä\u{00DF}", "Passwort: typografische Bindestriche und unsichtbare Zeichen werden bereinigt")
-        let presets = MailProvider.all.filter { !$0.isCustom }
+        let presets = MailProvider.builtIn.filter { !$0.isCustom }
         check(presets.count >= 7 && presets.allSatisfy { !$0.smtpHost.isEmpty && $0.smtpSecurity != .none && [465, 587].contains($0.smtpPort) }
-              && MailProvider.all.last?.isCustom == true && presets.first?.imapHost == ClientAccount.iCloudHost, "Anbieter-Vorgaben: IMAP und SMTP vollständig, verschlüsselt")
+              && MailProvider.builtIn.last?.isCustom == true && presets.first?.imapHost == ClientAccount.iCloudHost, "Anbieter-Vorgaben: IMAP und SMTP vollständig, verschlüsselt")
         do { try await client.login(user: "anna", password: "falsch"); check(false, "Server: falsches Passwort wird abgelehnt") }
         catch IMAPError.auth { check(true, "Server: falsches Passwort wird abgelehnt") }
         try await client.login(user: "anna", password: "secret")
@@ -534,6 +542,266 @@ enum ClientSelfTest {
         do { try await SMTPClient.send(config, user: "x", password: "y", from: "a@x.de", recipients: ["b@x.de"], message: built.data); check(false, "SMTP: Server nicht erreichbar") }
         catch { check(true, "SMTP: nicht erreichbarer Server wird als Fehler gemeldet") }
         m.subject = ""
+    }
+
+    // MARK: mailto und .eml
+
+    static func externalOpenTests() {
+        func mt(_ s: String) -> MailtoDraft? { URL(string: s).flatMap(MailtoURL.parse) }
+        check(mt("mailto:anna@example.org") == MailtoDraft(to: ["anna@example.org"]), "mailto: einfache Adresse")
+        let full = mt("mailto:anna@example.org,bernd@example.org?cc=c@example.org&bcc=b@example.org&subject=Hallo%20Welt%20%C3%A4&body=Zeile%201%0D%0AZeile%202")
+        check(full?.to == ["anna@example.org", "bernd@example.org"] && full?.cc == ["c@example.org"] && full?.bcc == ["b@example.org"]
+              && full?.subject == "Hallo Welt ä" && full?.body == "Zeile 1\nZeile 2", "mailto: mehrere Empfänger, Cc, Bcc, Betreff, Text (UTF-8, CRLF)")
+        check(mt("mailto:?to=x@example.org&subject=A+B")?.to == ["x@example.org"] && mt("mailto:?subject=A+B")?.subject == "A+B", "mailto: Plus bleibt Plus, to im Parameter")
+        let evil = mt("mailto:a@example.org?subject=Hi%0D%0ABcc:%20spion@example.org&attach=/etc/passwd")
+        check(evil?.subject == "Hi  Bcc: spion@example.org" && evil?.bcc == [] && evil?.to == ["a@example.org"], "mailto: Zeilenumbrüche im Betreff schleusen keine Kopfzeile ein, attach wird ignoriert")
+        check(mt("https://example.org") == nil && mt("mailto:")?.to == [], "mailto: andere Schemata werden abgelehnt, leerer Link ist leer")
+
+        // .eml
+        var out = OutgoingMessage(fromName: "Anna", fromEmail: "anna@example.org", to: ["bernd@example.org"], subject: "Prüfung ä", body: "Hallo Bernd")
+        out.attachments = [OutgoingAttachment(name: "a.txt", mime: "text/plain", data: Data("Anhang".utf8))]
+        let built = try? MessageBuilder.build(out)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("mp-test-\(UUID()).eml")
+        defer { try? FileManager.default.removeItem(at: url) }
+        if let built { try? built.data.write(to: url) }
+        let opened = OpenedEML.read(url)
+        check(opened?.header.subject == "Prüfung ä" && opened?.header.fromEmail == "anna@example.org" && opened?.parsed.text.contains("Hallo Bernd") == true
+              && opened?.parsed.attachments.first?.name == "a.txt", ".eml: Kopfzeilen, Text und Anhang werden gelesen")
+        check(OpenedEML.read(URL(fileURLWithPath: "/nicht/vorhanden.eml")) == nil, ".eml: fehlende Datei ergibt nichts")
+    }
+
+    // MARK: Signatur und formatierter Text
+
+    static func composeRichTests() {
+        // Signatur
+        check(Signature.block("  Anna\nMuster GmbH \n") == "\n\n-- \nAnna\nMuster GmbH" && Signature.block("  \n") == "", "Signatur: Trennzeile und Text, leer ergibt nichts")
+        check(Signature.replacing(nil, with: "Anna", in: "") == "\n\n-- \nAnna", "Signatur: neue Nachricht – unter dem Text")
+        check(Signature.replacing(nil, with: "Anna", in: "Hallo\n\nViele Grüße") == "Hallo\n\nViele Grüße\n\n-- \nAnna", "Signatur: unter vorhandenem Text")
+        let quoted = "\n\nAm 3. November 2026 um 10:00 schrieb Bernd:\n> Frage"
+        check(Signature.replacing(nil, with: "Anna", in: quoted) == "\n\n-- \nAnna" + quoted, "Signatur: bei Antworten über dem Zitat")
+        let fwd = "\n\n-------- Weitergeleitete Nachricht --------\nVon: x"
+        check(Signature.replacing(nil, with: "Anna", in: fwd) == "\n\n-- \nAnna" + fwd, "Signatur: bei Weiterleitungen über der weitergeleiteten Nachricht")
+        let withSig = Signature.replacing(nil, with: "Anna", in: "Text" + quoted)
+        check(Signature.replacing("Anna", with: "Bernd\nFirma", in: withSig) == "Text\n\n-- \nBernd\nFirma" + quoted, "Signatur: Austausch beim Kontowechsel")
+        check(Signature.replacing("Anna", with: "", in: withSig) == "Text" + quoted && Signature.replacing("Anna", with: "Anna", in: withSig) == withSig, "Signatur: entfernen, gleiche Signatur ändert nichts")
+        check(Signature.replacing("Alt", with: "Neu", in: "Text") == "Text\n\n-- \nNeu", "Signatur: wurde die alte vom Nutzer geändert, wird die neue angehängt")
+        let e = Signature.edit(old: nil, new: "Ä", in: "Grüße" + quoted)
+        check(e.map { NSRange(location: 5, length: 0) == $0.range } == true, "Signatur: Einfügestelle in UTF-16-Einheiten")
+
+        // HTML
+        let fm = NSFontManager.shared
+        let base = NSFont.systemFont(ofSize: 14)
+        let a = NSMutableAttributedString(string: "Hallo Welt & <Co>\nzweite Zeile fett kursiv\n\n> zitiert\n>> tiefer\nEnde", attributes: [.font: base])
+        a.addAttribute(.font, value: fm.convert(base, toHaveTrait: .boldFontMask), range: NSRange(location: 0, length: 5))
+        let boldItalic = fm.convert(fm.convert(base, toHaveTrait: .boldFontMask), toHaveTrait: .italicFontMask)
+        a.addAttribute(.font, value: boldItalic, range: (a.string as NSString).range(of: "fett kursiv"))
+        a.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: (a.string as NSString).range(of: "Welt"))
+        a.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: (a.string as NSString).range(of: "zweite"))
+        a.addAttribute(.link, value: URL(string: "https://example.org/a?x=1&y=2")!, range: (a.string as NSString).range(of: "Ende"))
+        let html = HTMLExport.html(from: a)
+        check(html.contains("<div><b>Hallo</b> <u>Welt</u> &amp; &lt;Co&gt;</div>"), "HTML: fett, unterstrichen, Sonderzeichen maskiert, eine Zeile je div")
+        check(html.contains("<div><s>zweite</s> Zeile <i><b>fett kursiv</b></i></div>") && html.contains("<div><br></div>"), "HTML: durchgestrichen, fett und kursiv verschachtelt, leere Zeile bleibt")
+        check(html.contains("<blockquote") && html.contains("<div>zitiert</div>") && html.contains("<div>tiefer</div>\n</blockquote></blockquote>") && !html.contains("&gt; zitiert"), "HTML: Zitate als verschachtelte Zitatblöcke ohne „> “")
+        check(html.contains("<a href=\"https://example.org/a?x=1&amp;y=2\">Ende</a>"), "HTML: Link mit maskierter Adresse")
+        check(HTMLExport.hasFormatting(a) && !HTMLExport.hasFormatting(NSAttributedString(string: "Nur Text", attributes: [.font: base])), "HTML: Formatierung erkannt, reiner Text nicht")
+        check(HTMLExport.html(from: NSAttributedString(string: "")).contains("<div"), "HTML: leerer Text ergibt ein leeres Gerüst")
+
+        // Editor-Steuerung (ohne Fenster)
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let ctl = RichTextController()
+        ctl.textView = tv
+        tv.delegate = ctl
+        tv.isRichText = true
+        tv.textStorage?.setAttributedString(NSAttributedString(string: "Hallo schöne Welt", attributes: [.font: RichTextController.baseFont]))
+        var changes: [String] = []
+        ctl.onChange = { changes.append($0) }
+        func traits(_ loc: Int) -> NSFontTraitMask { NSFontManager.shared.traits(of: (tv.textStorage?.attribute(.font, at: loc, effectiveRange: nil) as? NSFont) ?? RichTextController.baseFont) }
+        tv.setSelectedRange(NSRange(location: 6, length: 6))   // „schöne“
+        ctl.toggleBold()
+        check(traits(6).contains(.boldFontMask) && traits(11).contains(.boldFontMask) && !traits(0).contains(.boldFontMask) && !traits(13).contains(.boldFontMask), "Editor: Auswahl wird fett, der Rest nicht")
+        ctl.toggleBold()
+        check(!traits(6).contains(.boldFontMask), "Editor: erneut umschalten nimmt fett zurück")
+        ctl.toggleItalic(); ctl.toggleUnderline(); ctl.toggleStrikethrough()
+        let html2 = HTMLExport.html(from: ctl.attributed)
+        check(html2.contains("<s><u><i>schöne</i></u></s>") || html2.contains("<s><u><i>"), "Editor: kursiv, unterstrichen und durchgestrichen landen im HTML")
+        ctl.setLink("example.org")
+        check(HTMLExport.html(from: ctl.attributed).contains("<a href=\"https://example.org\">") && ctl.selectedHasLink, "Editor: Link ohne Schema wird https")
+        ctl.setLink("javascript:alert(1)")
+        check(HTMLExport.html(from: ctl.attributed).contains("https://example.org") && !HTMLExport.html(from: ctl.attributed).contains("javascript"), "Editor: unsichere Link-Schemata werden abgelehnt")
+        ctl.setLink("")
+        check(!ctl.selectedHasLink, "Editor: leerer Link entfernt den Link")
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        ctl.toggleBold()
+        check(((tv.typingAttributes[.font] as? NSFont).map { NSFontManager.shared.traits(of: $0).contains(.boldFontMask) }) == true, "Editor: ohne Auswahl wirkt Fett auf den weiteren Text")
+        ctl.replace(NSRange(location: 0, length: 5), with: "Servus")
+        check(ctl.string == "Servus schöne Welt" && changes.last == "Servus schöne Welt", "Editor: Ersetzen meldet die Änderung")
+        ctl.setRich(false)
+        check(!ctl.isRich && !HTMLExport.hasFormatting(ctl.attributed) && ctl.string == "Servus schöne Welt", "Editor: „Nur Text“ entfernt jede Formatierung, der Text bleibt")
+        tv.setSelectedRange(NSRange(location: 0, length: 6))
+        ctl.toggleBold()
+        check(!HTMLExport.hasFormatting(ctl.attributed), "Editor: im Textmodus wirkt keine Formatierung")
+
+        // Nachricht mit Text und HTML
+        var out = OutgoingMessage(fromName: "Anna", fromEmail: "anna@example.org", to: ["bernd@example.org"], subject: "Formatiert", body: "Hallo Welt ä")
+        out.html = "<div><b>Hallo</b> Welt ä</div>"
+        if let built = try? MessageBuilder.build(out) {
+            let raw = String(decoding: built.data, as: UTF8.self)
+            let parsed = MIME.extract(MIME.parse(Array(built.data)))
+            check(raw.contains("multipart/alternative") && !raw.contains("multipart/mixed") && parsed.text.contains("Hallo Welt ä") && parsed.html?.contains("<b>Hallo</b> Welt ä") == true, "Nachricht: Text und HTML als „alternative“, beide lesbar")
+        } else { check(false, "Nachricht: Text und HTML bauen") }
+        out.attachments = [OutgoingAttachment(name: "a.txt", mime: "text/plain", data: Data("Anhang".utf8))]
+        if let built = try? MessageBuilder.build(out) {
+            let raw = String(decoding: built.data, as: UTF8.self)
+            let parsed = MIME.extract(MIME.parse(Array(built.data)))
+            check(raw.contains("multipart/mixed") && raw.contains("multipart/alternative") && parsed.html != nil && parsed.text.contains("Hallo Welt ä") && parsed.attachments.first?.name == "a.txt",
+                  "Nachricht: Text, HTML und Anhang zusammen")
+        } else { check(false, "Nachricht: Text, HTML und Anhang bauen") }
+        out.html = nil; out.attachments = []
+        let plain = (try? MessageBuilder.build(out)).map { String(decoding: $0.data, as: UTF8.self) } ?? ""
+        check(!plain.contains("multipart") && plain.contains("text/plain"), "Nachricht: ohne HTML bleibt es reiner Text")
+
+        // Konto: Signatur bleibt erhalten, ältere Dateien ohne Signatur lesbar
+        var acct = ClientAccount(name: "X", email: "x@example.org", username: "x", host: "imap.example.org")
+        acct.signature = "Viele Grüße\nAnna"
+        let data = try? JSONEncoder().encode(acct)
+        check(data.flatMap { try? JSONDecoder().decode(ClientAccount.self, from: $0) }?.signature == "Viele Grüße\nAnna"
+              && (try? JSONDecoder().decode(ClientAccount.self, from: Data(#"{"name":"A","email":"a@x.de","host":"h"}"#.utf8)))?.signature == "", "Konto: Signatur wird gespeichert, ältere Konten bleiben lesbar")
+    }
+
+    // MARK: Suche
+
+    static func searchQueryTests() {
+        let q = ClientSearchQuery.parse(#"von:anna Rechnung "zwei Wörter" betreff:Oktober an:bernd@x.de"#)
+        check(q.from == ["anna"] && q.terms == ["Rechnung", "zwei Wörter"] && q.subject == ["Oktober"] && q.to == ["bernd@x.de"], "Suche: von:, an:, betreff:, Begriffe und Phrasen")
+        check(ClientSearchQuery.parse("   ").isEmpty && ClientSearchQuery.parse("von:").isEmpty && ClientSearchQuery.parse("\"\"").isEmpty, "Suche: leere Eingaben ergeben nichts")
+        check(ClientSearchQuery.parse("http://x.de").terms == ["http://x.de"] && ClientSearchQuery.parse("12:30 Uhr").terms == ["12:30", "Uhr"], "Suche: unbekannte Doppelpunkte bleiben Teil des Begriffs")
+    }
+
+    static func searchStoreTests() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mp-search-\(UUID()).sqlite")
+        defer { for x in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: tmp.path + x) } }
+        let store = try Store(path: tmp)
+        func add(_ account: String, _ folder: String, _ uid: Int, _ subject: String, from: String, name: String, to: String, preview: String, body: String?, day: Double) throws {
+            try store.db.exec("""
+                INSERT INTO c_message (account, folder, uid, message_id, in_reply_to, refs, subject, sender_name, sender_email, recipients, date, flags, size, preview, body_text)
+                VALUES (?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, '', 0, ?, ?)
+                """, [account, folder, uid, "m\(uid)@x", subject, name, from, to, Date(timeIntervalSince1970: day * 86400), preview, body as Any])
+        }
+        try add("A", "INBOX", 1, "Rechnung Oktober", from: "anna@firma.example", name: "Anna Weber", to: "ich@a.example", preview: "Anbei", body: "Bitte überweisen bis Freitag", day: 10)
+        try add("A", "INBOX", 2, "Terminfrage", from: "bernd@firma.example", name: "Bernd", to: "ich@a.example", preview: "Haben Sie Zeit?", body: "Rechnung 100% sicher_", day: 11)
+        try add("A", "Archiv", 3, "Alte Rechnung", from: "anna@firma.example", name: "Anna Weber", to: "ich@a.example", preview: "alt", body: nil, day: 5)
+        try add("B", "INBOX", 4, "Rechnung November", from: "shop@x.example", name: "Shop", to: "ich@b.example", preview: "Ihre Bestellung", body: "Gesamt 50 EUR", day: 12)
+        func found(_ text: String, _ scope: ClientSearchScope) -> [Int] { store.clientSearch(ClientSearchQuery.parse(text), scope: scope).map { Int($0.uid) } }
+
+        check(found("rechnung", .all) == [4, 2, 1, 3], "Suche: Betreff und Text, alle Konten, neueste zuerst")
+        check(found("rechnung", .account("A")) == [2, 1, 3] && found("rechnung", .folder(account: "A", path: "INBOX")) == [2, 1], "Suche: Bereich Konto und Ordner")
+        check(found("von:anna", .all) == [1, 3] && found("von:anna rechnung oktober", .all) == [1], "Suche: von: und mehrere Begriffe (alle müssen passen)")
+        check(found("betreff:termin", .all) == [2] && found("an:ich@b.example", .all) == [4], "Suche: betreff: und an:")
+        check(found("überweisen", .all) == [1] && found("anbei", .all) == [1], "Suche: Text und Vorschau")
+        check(found("100%", .all) == [2] && found("sicher_", .all) == [2] && found("%", .all) == [2], "Suche: % und _ sind normale Zeichen")
+        check(found("", .all).isEmpty && found("gibtesnicht", .all).isEmpty, "Suche: leer und ohne Treffer")
+        check(store.clientSearch(ClientSearchQuery.parse("rechnung"), scope: .all, limit: 2).count == 2, "Suche: Höchstzahl der Treffer")
+
+        // Bestand ohne Suchtext wird nachträglich aufbereitet
+        try store.db.exec("UPDATE c_message SET raw = ?, body_text = NULL WHERE uid = 3", [Data("Subject: x\r\n\r\nUnbekanntes Stichwort Zebra".utf8)])
+        check(store.clientBodiesWithoutSearchText(limit: 10).map { Int($0.uid) } == [3], "Suche: Nachricht mit Rohtext, aber ohne Suchtext wird erkannt")
+        store.setClientSearchText(account: "A", folder: "Archiv", uid: 3, text: "Unbekanntes Stichwort Zebra")
+        check(found("zebra", .all) == [3] && store.clientBodiesWithoutSearchText(limit: 10).isEmpty, "Suche: nach der Aufbereitung auffindbar")
+    }
+
+    // MARK: Viele Konten
+
+    static func accountLimitTests() {
+        func acct(_ name: String, _ mail: String, host: String = "imap.example.org") -> ClientAccount {
+            ClientAccount(name: name, email: mail, username: mail, host: host)
+        }
+        var list: [ClientAccount] = []
+        for n in 1...ClientAccount.maxAccounts { list.append(acct("K\(n)", "k\(n)@example.org")) }
+        check(ClientAccount.maxAccounts == 16 && ClientAccount.rejection(adding: acct("K17", "k17@example.org"), to: list)?.contains("16") == true,
+              "Konten: höchstens 16")
+        check(ClientAccount.rejection(adding: acct("K16", "k16@example.org"), to: Array(list.prefix(15))) == nil, "Konten: das 16. ist erlaubt")
+        check(ClientAccount.rejection(adding: acct("Neu", "K3@Example.org"), to: list.prefix(5).map { $0 })?.contains("bereits") == true
+              && ClientAccount.rejection(adding: acct("Neu", "k3@example.org", host: "imap.anders.example"), to: list.prefix(5).map { $0 }) == nil,
+              "Konten: dasselbe Postfach nicht doppelt (Groß-/Kleinschreibung egal), gleiche Adresse bei anderem Server schon")
+        check(ClientAccount.uniqueName("GMX", among: []) == "GMX" && ClientAccount.uniqueName("GMX", among: [acct("gmx", "a@gmx.net")]) == "GMX 2"
+              && ClientAccount.uniqueName("GMX", among: [acct("GMX", "a@gmx.net"), acct("GMX 2", "b@gmx.net")]) == "GMX 3", "Konten: Namen bleiben eindeutig")
+    }
+
+    /// Mehrere Konten gleichzeitig gegen eigene Fake-Server abgleichen; ein unerreichbares Konto stört die anderen nicht.
+    static func manyAccountsTests() async throws {
+        var servers: [FakeIMAPServer] = []
+        var accounts: [ClientAccount] = []
+        for n in 1...6 {
+            let server = FakeIMAPServer()
+            server.messages = [101: .init(flags: [], raw: rawText("a\(n)-1@x.example", from: "Absender \(n) <s\(n)@x.example>", to: "k\(n)@example.org", subject: "Konto \(n) Mail 1", body: "Text \(n)")),
+                               102: .init(flags: ["\\Seen"], raw: rawText("a\(n)-2@x.example", from: "Absender \(n) <s\(n)@x.example>", to: "k\(n)@example.org", subject: "Konto \(n) Mail 2", body: "Text \(n)b"))]
+            try await server.start()
+            servers.append(server)
+            accounts.append(ClientAccount(name: "K\(n)", email: "k\(n)@example.org", username: "anna", host: "127.0.0.1", port: server.port))
+        }
+        defer { servers.forEach { $0.stop() } }
+        let dead = ClientAccount(name: "Tot", email: "tot@example.org", username: "anna", host: "127.0.0.1", port: 1)
+        accounts.append(dead)
+
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mp-many-\(UUID()).sqlite")
+        defer { for x in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: tmp.path + x) } }
+        let store = try Store(path: tmp)
+        let results = Results()
+        await forEachConcurrently(accounts, limit: 4) { account in
+            do {
+                let client = IMAPClient(.init(host: account.host, port: account.port, tls: false))
+                try await client.connect()
+                try await client.login(user: "anna", password: "secret")
+                try await ClientBackend.sync(store: store, client: client, account: account, prefix: "Claude/", includeSent: false, inboxLimit: 100)
+                await client.close()
+                await results.ok(account.name)
+            } catch {
+                await results.failed(account.name)
+            }
+        }
+        let (okNames, failedNames) = await results.snapshot()
+        check(okNames.count == 6 && failedNames == ["Tot"], "Mehrere Konten: sechs gleichzeitig abgeglichen, das unerreichbare fällt allein aus")
+        let each = accounts.prefix(6).map { store.clientUIDs(account: $0.id.uuidString, folder: "INBOX").count }
+        check(each == [2, 2, 2, 2, 2, 2], "Mehrere Konten: jedes Konto hat genau seine zwei Mails")
+        let unified = store.clientUnifiedInbox()
+        check(unified.count == 12 && Set(unified.map(\.account)).count == 6 && store.clientUnifiedInbox(limit: 5).count == 5
+              && zip(unified, unified.dropFirst()).allSatisfy { $0.date >= $1.date }, "Alle Posteingänge: zwölf Mails aus sechs Konten, neueste zuerst, Begrenzung gilt")
+        let subjects = Set(unified.filter { $0.account == accounts[2].id.uuidString }.map(\.subject))
+        check(subjects == ["Konto 3 Mail 1", "Konto 3 Mail 2"], "Mehrere Konten: keine Vermischung zwischen Konten")
+        store.removeClientAccount(accounts[0].id.uuidString)
+        check(store.clientUnifiedInbox().count == 10, "Alle Posteingänge: entferntes Konto verschwindet")
+    }
+
+    actor Results {
+        private var okNames: [String] = []
+        private var failedNames: [String] = []
+        func ok(_ n: String) { okNames.append(n) }
+        func failed(_ n: String) { failedNames.append(n) }
+        func snapshot() -> ([String], [String]) { (okNames.sorted(), failedNames.sorted()) }
+    }
+
+    actor Gauge {
+        private var running = 0
+        private(set) var peak = 0
+        private(set) var total = 0
+        func enter() { running += 1; total += 1; peak = max(peak, running) }
+        func leave() { running -= 1 }
+    }
+
+    static func concurrencyTests() async {
+        let gauge = Gauge()
+        await forEachConcurrently(Array(1...16), limit: 4) { _ in
+            await gauge.enter()
+            try? await Task.sleep(for: .milliseconds(30))
+            await gauge.leave()
+        }
+        let peak = await gauge.peak, total = await gauge.total
+        check(total == 16 && peak <= 4 && peak >= 2, "Parallel: alle 16 laufen, höchstens 4 gleichzeitig (Spitze \(peak))")
+        let one = Gauge()
+        await forEachConcurrently([1, 2, 3], limit: 0) { _ in await one.enter(); await one.leave() }
+        let onePeak = await one.peak, oneTotal = await one.total
+        check(oneTotal == 3 && onePeak == 1, "Parallel: Grenze 0 wird wie 1 behandelt")
+        await forEachConcurrently([Int](), limit: 4) { _ in check(false, "Parallel: leere Liste ruft nichts auf") }
     }
 }
 

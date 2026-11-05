@@ -589,6 +589,7 @@ struct PlannerDraftSheet: View {
 
 /// Knöpfe „Termin“ und „Erinnerung“ für eine Mail.
 struct PlanMenu: View {
+    @EnvironmentObject private var engine: Engine
     let subject: String
     let sender: String
     let date: Date
@@ -597,6 +598,10 @@ struct PlanMenu: View {
     var due: String?
 
     var body: some View {
+        if engine.settings.useCalendar { menu }
+    }
+
+    private var menu: some View {
         Menu {
             Button { Planner.shared.plan(.reminder, subject: subject, sender: sender, date: date, messageId: messageId, ownClient: ownClient, due: due) } label: {
                 Label("Erinnerung anlegen …", systemImage: "bell")

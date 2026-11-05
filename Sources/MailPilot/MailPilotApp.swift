@@ -29,9 +29,17 @@ enum EntryPoint {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    private let services = MailServiceProvider()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         if Bundle.main.bundleIdentifier != nil { UNUserNotificationCenter.current().delegate = self }
+        NSApp.servicesProvider = services
         Engine.shared.start()
+    }
+
+    /// `mailto:`-Links, `.eml`-Dateien, Dateien auf dem Programmsymbol und `mailpilot://`-Verweise.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        Task { @MainActor in ExternalOpen.shared.handle(urls) }
     }
 
     /// Mitteilungen auch zeigen, wenn MailPilot im Vordergrund ist.

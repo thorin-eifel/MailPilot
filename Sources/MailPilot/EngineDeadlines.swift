@@ -62,6 +62,7 @@ extension Engine {
     /// Trägt die Frist eines Gesprächs als Erinnerung oder Kalendereintrag ein. Doppelte Einträge werden verhindert.
     @discardableResult
     func exportDeadline(_ thread: MailThread, kind: DeadlineKind, automatic: Bool = false) async -> Bool {
+        guard settings.useCalendar else { lastError = "Kalender und Erinnerungen sind ausgeschaltet."; return false }
         guard let due = thread.dueDate, Deadlines.parse(due) != nil else {
             lastError = "Das Gespräch hat keine gültige Frist."
             return false
@@ -99,7 +100,7 @@ extension Engine {
 
     /// Automatische Übernahme (Einstellungen → Fristen); höchstens `limit` neue Einträge je Durchlauf.
     func syncDeadlines(limit: Int = 8) async {
-        let kinds = settings.deadlineTarget.kinds
+        let kinds = settings.useCalendar ? settings.deadlineTarget.kinds : []
         guard !kinds.isEmpty else { return }
         var created = 0
         for t in threads where Deadlines.eligible(t) {

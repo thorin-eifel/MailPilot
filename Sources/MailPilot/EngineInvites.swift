@@ -26,7 +26,7 @@ extension Engine {
             try? store.markInviteScanned(m.messageId)
         }
         reload()
-        if settings.autoAddInvites, !settings.calendarID.isEmpty {
+        if settings.useCalendar, settings.autoAddInvites, !settings.calendarID.isEmpty {
             for inv in invites where inv.status == "new" && !inv.event.cancelled && inv.event.start > Date() { _ = await addInvite(inv) }
         }
     }
@@ -34,6 +34,7 @@ extension Engine {
     /// Trägt den Termin in den gewählten Kalender ein (jeden Termin nur einmal).
     @discardableResult
     func addInvite(_ inv: Invite) async -> Bool {
+        guard settings.useCalendar else { lastError = "Kalender und Erinnerungen sind ausgeschaltet."; return false }
         guard !settings.calendarID.isEmpty else { lastError = "Kein Kalender gewählt (Einstellungen → Fristen)."; return false }
         let key = "invite:\(inv.event.uid)"
         let iso = ISO8601DateFormatter().string(from: inv.event.start)

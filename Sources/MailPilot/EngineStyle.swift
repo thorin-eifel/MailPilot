@@ -132,17 +132,18 @@ extension Engine {
     /// Name des Absenders: aus der Mail, sonst aus den Kontakten, sonst die Adresse.
     func displayName(_ m: StoredMessage) -> String {
         if let n = MailAddress.parse(m.sender).name { return n }
-        return (settings.useContactNames ? ContactsDirectory.shared.name(for: m.senderEmail) : nil) ?? m.senderEmail
+        return (settings.useContactNames && settings.useContacts ? ContactsDirectory.shared.name(for: m.senderEmail) : nil) ?? m.senderEmail
     }
 
     /// Name zu einer Adresse wie `Anna <anna@x.de>`.
     func contactName(_ raw: String) -> String {
         let p = MailAddress.parse(raw)
         if let n = p.name { return n }
-        return (settings.useContactNames ? ContactsDirectory.shared.name(for: p.email) : nil) ?? p.email
+        return (settings.useContactNames && settings.useContacts ? ContactsDirectory.shared.name(for: p.email) : nil) ?? p.email
     }
 
     func requestContactsAccess() async {
+        guard settings.useContacts else { return }
         let ok = await ContactsDirectory.shared.requestAccess()
         if ok { await syncContacts() }
         objectWillChange.send()
@@ -150,7 +151,7 @@ extension Engine {
 
     /// Liest die Kontakte und gleicht die VIP-Gruppe ab.
     func syncContacts() async {
-        guard ContactsDirectory.shared.isAuthorized else { return }
+        guard settings.useContacts, ContactsDirectory.shared.isAuthorized else { return }
         do { try ContactsDirectory.shared.reload() } catch { lastError = "Kontakte konnten nicht gelesen werden: \(error.localizedDescription)"; return }
         if !settings.vipContactGroup.isEmpty {
             let members = ContactsDirectory.shared.members(ofGroup: settings.vipContactGroup)
@@ -175,7 +176,7 @@ extension Engine {
 
     /// Freie Zeiten als Text („Dienstag, 4. November, 10:00–11:00 Uhr“) – nur wenn die Mail eine Terminabsprache nahelegt oder `force`.
     func freeSlotTexts(for msgs: [StoredMessage], force: Bool) -> [String] {
-        guard settings.useFreeSlots, CalendarAvailability.shared.isAuthorized else { return [] }
+        guard settings.useCalendar, settings.useFreeSlots, CalendarAvailability.shared.isAuthorized else { return [] }
         if !force {
             guard let last = msgs.last(where: { !$0.isFromMe }), Self.mentionsScheduling(last.subject + " " + last.content) else { return [] }
         }
@@ -190,6 +191,7 @@ extension Engine {
     }
 
     func requestCalendarAccess() async {
+        guard settings.useCalendar else { return }
         _ = await CalendarAvailability.shared.requestAccess()
         objectWillChange.send()
     }

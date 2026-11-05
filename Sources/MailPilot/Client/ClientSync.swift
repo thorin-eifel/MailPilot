@@ -50,7 +50,7 @@ enum ClientSync {
         guard let client else { throw IMAPError.connection("Nicht verbunden.") }
         let raw = Data(try await client.fetchBody(path, uid: uid))
         let parsed = MIME.extract(MIME.parse(Array(raw)))
-        try store.saveClientBody(account: account, folder: path, uid: uid, raw: raw, preview: parsed.preview)
+        try store.saveClientBody(account: account, folder: path, uid: uid, raw: raw, preview: parsed.preview, text: parsed.plainText)
         return raw
     }
 }

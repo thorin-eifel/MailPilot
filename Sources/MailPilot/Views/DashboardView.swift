@@ -53,6 +53,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
 struct DashboardView: View {
     @EnvironmentObject var engine: Engine
     @ObservedObject private var planner = Planner.shared
+    @ObservedObject private var external = ExternalOpen.shared
     @ViewState private var selection: SidebarItem?
 
     init(initial: SidebarItem = .briefing) {
@@ -69,8 +70,10 @@ struct DashboardView: View {
                 Section {
                     row(.mailbox, count: nil)
                     if selection == .mailbox { MailboxSidebarTree { selection = .mailbox } }
-                    row(.calendar, count: nil)
-                    row(.reminders, count: planner.overdueCount)
+                    if engine.settings.useCalendar {
+                        row(.calendar, count: nil)
+                        row(.reminders, count: planner.overdueCount)
+                    }
                     row(.search, count: nil)
                     row(.weekly, count: nil)
                 }
@@ -135,10 +138,14 @@ struct DashboardView: View {
         }
         .tint(CTW.accent)
         .sheet(item: $planner.draft) { PlannerDraftSheet(draft: $0) }
-        .onOpenURL { url in
-            if let id = PlannerDraft.messageId(fromLink: url) { engine.openMessage(messageId: id) }
+        .sheet(item: $external.eml) { EMLViewerSheet(message: $0).environmentObject(engine) }
+        .alert("MailPilot", isPresented: Binding(get: { external.notice != nil }, set: { if !$0 { external.notice = nil } })) {
+            Button("OK") { external.notice = nil }
+        } message: { Text(external.notice ?? "") }
+        .task { if engine.settings.useCalendar { await planner.reload() } }
+        .onChange(of: engine.settings.useCalendar) { _, on in
+            if !on, selection == .calendar || selection == .reminders { selection = .briefing }
         }
-        .task { await planner.reload() }
         .onChange(of: engine.requestedSidebar) { _, new in
             if let new { selection = new; engine.requestedSidebar = nil }
         }

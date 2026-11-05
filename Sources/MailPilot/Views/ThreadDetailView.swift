@@ -102,7 +102,7 @@ struct ThreadDetailView: View {
                                     Label("Zeiten vorschlagen", systemImage: "calendar.badge.clock")
                                 }
                                 .buttonStyle(.ctwSecondary)
-                                .disabled(working || !CalendarAvailability.shared.isAuthorized || !engine.settings.useFreeSlots)
+                                .disabled(working || !engine.settings.useCalendar || !CalendarAvailability.shared.isAuthorized || !engine.settings.useFreeSlots)
                                 .help(CalendarAvailability.shared.isAuthorized
                                       ? "Schreibt den Entwurf neu und schlägt dabei freie Zeiten aus deinem Kalender vor"
                                       : "Dafür braucht MailPilot Zugriff auf den Kalender (Einstellungen → Kalender & freie Zeiten)")

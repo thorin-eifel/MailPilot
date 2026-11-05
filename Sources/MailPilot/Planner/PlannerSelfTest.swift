@@ -88,4 +88,72 @@ extension SelfTest2 {
               "Postfach: nur analysierte Mails bekommen Claude-Ergebnisse")
         check(store.analyses(messageIds: []).isEmpty, "Postfach: leere Liste")
     }
+
+    /// Vorgaben der Organisation: anwenden, sperren, laden.
+    static func policyTests(_ tmp: URL) throws {
+        let json = """
+        {"organization":"CTW","supportContact":"it@ctw.example",
+         "claude":{"enabled":false,"model":"haiku","environment":{"HTTPS_PROXY":"http://proxy.ctw.example:3128"}},
+         "features":{"calendar":false,"contacts":false,"appleMail":false},
+         "folderPrefix":"CTW/","dryRun":true,"maxAccounts":4,
+         "privacyRules":[{"name":"Personal","conditions":[{"field":"domain","value":"betriebsrat.example"}]}],
+         "providers":[{"name":"CTW Mail","imapHost":"imap.ctw.example","smtpHost":"smtp.ctw.example","smtpPort":465,"smtpSecurity":"tls","hint":"Domänenkonto"}],
+         "onlyListedProviders":true}
+        """
+        let policy = try JSONDecoder().decode(Policy.self, from: Data(json.utf8))
+        var user = AppSettings()
+        user.useClaude = true; user.model = "opus"; user.folderPrefix = "Mein/"; user.useCalendar = true; user.useContacts = true; user.useAppleMail = true
+        var own = PrivacyRule(); own.name = "Eigene"
+        user.privacyRules = [own]
+        let applied = policy.apply(to: user)
+        check(!applied.useClaude && applied.model == "haiku" && applied.folderPrefix == "CTW/" && !applied.useCalendar && !applied.useContacts && !applied.useAppleMail && applied.dryRun,
+              "Vorgaben: Claude, Modell, Präfix, Funktionen und Probelauf werden erzwungen")
+        check(applied.privacyRules.count == 2 && applied.privacyRules[0].managed && applied.privacyRules[0].name == "Personal" && !applied.privacyRules[1].managed,
+              "Vorgaben: Datenschutz-Ausnahmen der Organisation stehen vorn, die eigenen bleiben")
+        check(policy.apply(to: applied) == applied && policy.apply(to: policy.apply(to: user)).privacyRules.count == 2, "Vorgaben: mehrfaches Anwenden ändert nichts und verdoppelt keine Regeln")
+        check(Policy().apply(to: user) == user && Policy().isEmpty, "Vorgaben: leere Vorgaben ändern nichts")
+        var tampered = applied; tampered.useClaude = true; tampered.folderPrefix = "x/"
+        check(policy.apply(to: tampered) == applied, "Vorgaben: eine Änderung durch den Nutzer wird zurückgesetzt")
+        check(policy.isLocked(.claudeEnabled) && policy.isLocked(.folderPrefix) && policy.isLocked(.privacyRules) && policy.isLocked(.providers) && !policy.isLocked(.archiveFolder)
+              && !policy.isLocked(.notifications), "Vorgaben: gesperrt ist nur, was gesetzt ist")
+        check(policy.lockedDescriptions.contains("Claude: ausgeschaltet") && policy.lockedDescriptions.contains("Höchstens 4 Konten"), "Vorgaben: Beschreibung für die Anzeige")
+        check(policy.maxClientAccounts == 4 && Policy(maxAccounts: 99).maxClientAccounts == 16 && Policy(maxAccounts: 0).maxClientAccounts == 1 && Policy().maxClientAccounts == 16,
+              "Vorgaben: Kontenzahl nur nach unten begrenzbar (1 bis 16)")
+        let providers = MailProvider.available(policy: policy)
+        check(providers.count == 1 && providers[0].name == "CTW Mail" && providers[0].smtpSecurity == .tls && providers[0].smtpPort == 465 && !providers[0].isCustom,
+              "Vorgaben: nur die vorgegebenen Mail-Anbieter")
+        var open = policy; open.onlyListedProviders = false
+        check(MailProvider.available(policy: open).count == MailProvider.builtIn.count + 1 && MailProvider.available(policy: Policy()).count == MailProvider.builtIn.count, "Vorgaben: Anbieter ergänzen statt ersetzen")
+
+        var fresh = AppSettings()
+        fresh.protectNewAccount(knownAccounts: ["iCloud", "Work"])
+        check(fresh.isEnabled("iCloud") && fresh.isEnabled("Work") && !fresh.isEnabled("Neu (IMAP)"), "Neue Konten: Claude ist zunächst aus, bekannte Konten bleiben freigegeben")
+        var chosen = AppSettings(); chosen.enabledAccounts = ["Work"]
+        chosen.protectNewAccount(knownAccounts: ["iCloud", "Work"])
+        check(chosen.enabledAccounts == ["Work"], "Neue Konten: eine getroffene Auswahl bleibt unverändert")
+
+        // Speichern: vorgegebene Ausnahmen kommen nicht in die Datei des Nutzers; alte Dateien ohne „managed“ bleiben lesbar
+        let file = tmp.appendingPathComponent("settings-policy.json")
+        applied.save(to: file)
+        let reloaded = AppSettings.load(from: file)
+        check(reloaded.privacyRules.count == 1 && reloaded.privacyRules[0].name == "Eigene" && !reloaded.privacyRules[0].managed, "Vorgaben: gespeichert werden nur die eigenen Ausnahmen")
+        let old = #"{"privacyRules":[{"id":"6F1E8B4A-0000-4000-8000-000000000001","name":"Alt","enabled":true,"matchAll":false,"keepBody":false,"conditions":[]}]}"#
+        let oldFile = tmp.appendingPathComponent("old-settings.json")
+        try Data(old.utf8).write(to: oldFile)
+        check(AppSettings.load(from: oldFile).privacyRules.first?.name == "Alt", "Einstellungen: Ausnahmen aus einer älteren Version bleiben erhalten")
+
+        // Laden: Datei nur, wenn sie niemand außer root ändern kann; Profil nur, wenn verwaltet
+        let pf = tmp.appendingPathComponent("policy.json")
+        try Data(json.utf8).write(to: pf)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: pf.path)
+        let suite = UserDefaults(suiteName: "mp-test-\(UUID())")!
+        check(PolicyStore.load(defaults: suite, filePath: pf.path, requireRootFile: false).folderPrefix == "CTW/", "Vorgaben: Datei wird gelesen")
+        check(PolicyStore.load(defaults: suite, filePath: pf.path, requireRootFile: true).isEmpty, "Vorgaben: Datei, die nicht root gehört, zählt nicht")
+        try FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: pf.path)
+        check(PolicyStore.load(defaults: suite, filePath: pf.path, requireRootFile: false).isEmpty, "Vorgaben: für alle beschreibbare Datei zählt nicht")
+        suite.set(["folderPrefix": "MDM/"], forKey: "Policy")
+        check(PolicyStore.load(defaults: suite, filePath: "/nicht/da", requireRootFile: false).isEmpty, "Vorgaben: ein vom Nutzer selbst gesetzter Wert (nicht verwaltet) zählt nicht")
+        check(PolicyStore.decode(["folderPrefix": "MDM/", "claude": ["enabled": false]])?.claude?.enabled == false, "Vorgaben: Profil-Dictionary wird gelesen")
+        check(PolicyStore.decode(["folderPrefix": 5]) == nil, "Vorgaben: falsche Typen werden abgelehnt")
+    }
 }

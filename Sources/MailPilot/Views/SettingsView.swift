@@ -9,7 +9,11 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            ManagedSection()
+            FeaturesSection()
             AccountsSection()
+            ClientAccountsSection()
+            DefaultMailSection()
 
             Section(header: SectionHeader(title: "Automatik", symbol: "wand.and.stars")) {
                 Toggle("Mails automatisch in Ordner verschieben", isOn: $engine.settings.autoMove)
@@ -22,13 +26,13 @@ struct SettingsView: View {
                         ForEach(engine.settings.categories.map(\.name), id: \.self) { Text($0).tag($0) }
                     }
                 }
-                Toggle("Probelauf – nur protokollieren, nichts in Mail ändern", isOn: $engine.settings.dryRun)
+                Toggle("Probelauf – nur protokollieren, nichts in Mail ändern", isOn: $engine.settings.dryRun).disabled(PolicyStore.current.isLocked(.dryRun))
                 Toggle("Gesendete Mails einbeziehen (für „Warte auf Antwort“)", isOn: $engine.settings.includeSent)
-                Toggle("Mitteilungen (wichtige Mails, Follow-ups, Briefing)", isOn: $engine.settings.notifications)
-                TextField("Ordner-Präfix", text: $engine.settings.folderPrefix)
+                Toggle("Mitteilungen (wichtige Mails, Follow-ups, Briefing)", isOn: $engine.settings.notifications).disabled(PolicyStore.current.isLocked(.notifications))
+                TextField("Ordner-Präfix", text: $engine.settings.folderPrefix).disabled(PolicyStore.current.isLocked(.folderPrefix))
                 Stepper(engine.settings.archiveAfterDays == 0 ? "Erledigte Mails nicht archivieren" : "Erledigte Mails ohne Kategorie-Ordner nach \(engine.settings.archiveAfterDays) Tagen archivieren",
                         value: $engine.settings.archiveAfterDays, in: 0...365, step: 5)
-                TextField("Archivordner", text: $engine.settings.archiveFolder)
+                TextField("Archivordner", text: $engine.settings.archiveFolder).disabled(PolicyStore.current.isLocked(.archiveFolder))
                 Text("Ordner werden im jeweiligen Konto angelegt, z. B. „\(engine.settings.folderPrefix)Rechnungen“. Beim ersten Start wird der gesamte Posteingang katalogisiert und einsortiert; danach läuft der Zeitplan.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -66,15 +70,17 @@ struct SettingsView: View {
                     Text("Haiku (schnell)").tag("haiku")
                     Text("Opus (gründlich)").tag("opus")
                 }
+                .disabled(PolicyStore.current.isLocked(.claudeModel))
                 Picker("Modell für ältere Mails (Massenanalyse)", selection: $engine.settings.modelBulk) {
                     Text("Haiku (günstig, empfohlen)").tag("haiku")
                     Text("Sonnet").tag("sonnet")
                     Text("Wie oben").tag("")
                 }
+                .disabled(PolicyStore.current.isLocked(.claudeModelBulk))
                 Toggle("Automatische Mails ohne Claude einordnen (Header, bekannte Absender)", isOn: $engine.settings.prefilterEnabled)
                 Stepper(engine.settings.initialScanDays == 0 ? "Erstscan: gesamter Posteingang" : "Erstscan: nur die letzten \(engine.settings.initialScanDays) Tage",
                         value: $engine.settings.initialScanDays, in: 0...3650, step: 30)
-                TextField("Pfad zur claude CLI (leer = automatisch)", text: $engine.settings.claudePath)
+                TextField("Pfad zur claude CLI (leer = automatisch)", text: $engine.settings.claudePath).disabled(PolicyStore.current.isLocked(.claudePath))
                 HStack {
                     Button("Verbindung testen") {
                         testing = true
@@ -199,7 +205,7 @@ struct AccountsSection: View {
                 }
                 .toggleStyle(.switch)
             }
-            Toggle("Apple Mail verwenden", isOn: $engine.settings.useAppleMail)
+            Toggle("Apple Mail verwenden", isOn: $engine.settings.useAppleMail).disabled(PolicyStore.current.isLocked(.appleMail))
             HStack {
                 Button("Alle") { engine.settings.enabledAccounts = engine.accounts.map(\.name) }
                     .buttonStyle(.ctwSecondary)
@@ -370,16 +376,18 @@ struct PrivacySection: View {
                         Toggle("Aktiv", isOn: $rule.enabled).labelsHidden().toggleStyle(.switch)
                         TextField("Name", text: $rule.name).textFieldStyle(.plain).font(.system(size: 14, weight: .semibold))
                         Spacer()
-                        Button(role: .destructive) { engine.settings.privacyRules.removeAll { $0.id == rule.id } } label: {
+                        if rule.managed { Badge(text: "Vorgabe der Organisation", color: CTW.accent, symbol: "lock.fill") }
+                        else { Button(role: .destructive) { engine.settings.privacyRules.removeAll { $0.id == rule.id } } label: {
                             Image(systemName: "trash")
                         }
                         .buttonStyle(.borderless)
-                        .accessibilityLabel("Ausnahme löschen")
+                        .accessibilityLabel("Ausnahme löschen") }
                     }
                     ConditionsEditor(conditions: $rule.conditions, matchAll: $rule.matchAll)
                     Toggle("Mailtext nicht speichern (empfohlen)", isOn: Binding(get: { !rule.keepBody }, set: { rule.keepBody = !$0 }))
                         .toggleStyle(.switch)
                 }
+                .disabled(rule.managed)
                 .padding(12)
                 .background(CTW.surfaceSoft.opacity(rule.enabled ? 1 : 0.5), in: RoundedRectangle(cornerRadius: CTW.radius))
                 .overlay(RoundedRectangle(cornerRadius: CTW.radius).strokeBorder(CTW.lineSoft))
@@ -707,5 +715,61 @@ struct AvailabilitySection: View {
                 .font(.caption).foregroundStyle(CTW.muted)
         }
         .onAppear { calendars = CalendarAvailability.shared.calendars() }
+    }
+}
+
+// MARK: - Vorgaben und Funktionen
+
+/// Zeigt, was die Organisation vorgibt (nur wenn Vorgaben vorhanden sind).
+struct ManagedSection: View {
+    @ViewState private var policy = PolicyStore.current
+
+    var body: some View {
+        if !policy.isEmpty {
+            Section {
+                if let org = policy.organization { Label("Verwaltet von \(org)", systemImage: "building.2.fill").fontWeight(.semibold) }
+                ForEach(policy.lockedDescriptions, id: \.self) { Label($0, systemImage: "lock.fill").font(.callout).foregroundStyle(CTW.muted) }
+                if let c = policy.supportContact { Text("Fragen: \(c)").font(.caption).foregroundStyle(.secondary) }
+                Button("Vorgaben neu laden") { PolicyStore.reload(); policy = PolicyStore.current; Engine.shared.settings = Engine.shared.settings }
+                    .buttonStyle(.ctwSecondary)
+            } header: {
+                SectionHeader(title: "Vorgaben der Organisation", symbol: "building.2.crop.circle")
+            } footer: {
+                Text("Diese Einstellungen sind für alle Rechner festgelegt und lassen sich hier nicht ändern.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// Schalter für Funktionen, die am Mac hängen oder Daten nach außen geben.
+struct FeaturesSection: View {
+    @EnvironmentObject var engine: Engine
+
+    private func toggle(_ title: String, _ detail: String, _ isOn: Binding<Bool>, _ key: Policy.Key) -> some View {
+        Toggle(isOn: isOn) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(title)
+                    if PolicyStore.current.isLocked(key) { Image(systemName: "lock.fill").font(.caption).foregroundStyle(CTW.muted).help("Von der Organisation vorgegeben") }
+                }
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .toggleStyle(.switch)
+        .disabled(PolicyStore.current.isLocked(key))
+    }
+
+    var body: some View {
+        Section {
+            toggle("Claude", "Analyse, Entwürfe, Briefing. Aus: nichts geht an Claude, MailPilot arbeitet als reiner Mail-Client.", $engine.settings.useClaude, .claudeEnabled)
+            toggle("Apple Mail", "Konten aus Apple Mail lesen und steuern (per AppleScript).", $engine.settings.useAppleMail, .appleMail)
+            toggle("Kalender und Erinnerungen", "Ansichten, Termine aus Mails, Fristen, Einladungen, freie Zeiten.", $engine.settings.useCalendar, .calendar)
+            toggle("Kontakte", "Namen und VIP-Gruppe aus der Kontakte-App.", $engine.settings.useContacts, .contacts)
+            toggle("Mitteilungen", "Hinweise bei wichtigen Mails, Nachfass-Erinnerungen und Briefing.", $engine.settings.notifications, .notifications)
+        } header: {
+            SectionHeader(title: "Funktionen", symbol: "switch.2")
+        } footer: {
+            Text("Ausgeschaltete Funktionen fragen auch keine Berechtigung bei macOS an und verschwinden aus der Seitenleiste.").font(.caption).foregroundStyle(.secondary)
+        }
     }
 }

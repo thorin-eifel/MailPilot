@@ -37,7 +37,7 @@ struct MailboxView: View {
         }
         .sheet(item: $compose) { ComposeSheet(draft: $0).environmentObject(engine) }
         .onChange(of: model.pendingCompose?.id) { _, _ in takePending() }
-        .onAppear { takePending(); model.reloadAnalysis() }
+        .onAppear { takePending(); model.reloadAnalysis(); model.reindexBodies() }
         .onChange(of: model.messages.count) { _, _ in model.reloadAnalysis() }
         .onReceive(engine.$threads) { _ in model.reloadAnalysis() }
         .task {
@@ -83,12 +83,14 @@ struct MailboxView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
                 Eyebrow(text: "\(model.messages.count) Nachrichten")
-                Text(model.selectedFolder?.name ?? "Postfach").font(.system(size: 20, weight: .bold)).foregroundStyle(CTW.ink)
+                Text(model.showAllInboxes ? "Alle Posteingänge" : (model.selectedFolder?.leafName ?? "Postfach")).font(.system(size: 20, weight: .bold)).foregroundStyle(CTW.ink)
             }
-            .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 10)
+            .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(CTW.surface)
-            .overlay(alignment: .bottom) { Rectangle().fill(CTW.lineSoft).frame(height: 1) }
+
+            searchBar
+            Divider()
 
             List(model.messages, selection: Binding(get: { model.selectedMessageID }, set: { id in
                 model.selectedMessageID = id
@@ -96,17 +98,36 @@ struct MailboxView: View {
                 showMail = false
                 if let m = model.messages.first(where: { $0.id == id }) { Task { await model.open(m) } }
             })) { m in
-                MessageListRow(message: m, analysis: model.analysis[m.messageId]).tag(m.id).listRowSeparatorTint(CTW.lineSoft)
+                MessageListRow(message: m, analysis: model.analysis[m.messageId],
+                               accountName: model.searchActive ? model.locationLabel(for: m) : (model.showAllInboxes ? model.accountName(for: m.account) : nil)).tag(m.id).listRowSeparatorTint(CTW.lineSoft)
             }
             .scrollContentBackground(.hidden)
             .background(CTW.surface)
             .overlay {
                 if model.messages.isEmpty {
-                    ContentUnavailableView(model.busy ? "Lade …" : "Keine Nachrichten", systemImage: "tray").foregroundStyle(CTW.muted)
+                    ContentUnavailableView(model.searchActive ? "Keine Treffer" : (model.busy ? "Lade …" : "Keine Nachrichten"), systemImage: model.searchActive ? "magnifyingglass" : "tray").foregroundStyle(CTW.muted)
                 }
             }
         }
         .background(CTW.surface.ignoresSafeArea(edges: .top))
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(CTW.muted)
+            TextField("Suchen – von:anna betreff:rechnung \"zwei Wörter\"", text: $model.searchText).textFieldStyle(.plain)
+            if !model.searchText.isEmpty {
+                Button { model.searchText = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.borderless).foregroundStyle(CTW.muted).accessibilityLabel("Suche löschen")
+            }
+            Picker("", selection: $model.searchScopeKind) { ForEach(ClientModel.SearchScopeKind.allCases) { Text($0.label).tag($0) } }
+                .labelsHidden().pickerStyle(.menu).fixedSize()
+        }
+        .padding(.horizontal, 16).padding(.vertical, 6)
+        .background(CTW.surface)
+        .task(id: "\(model.searchText)|\(model.searchScopeKind.rawValue)") {
+            try? await Task.sleep(for: .milliseconds(250))
+            if !Task.isCancelled { model.applySearch() }
+        }
     }
 
     // MARK: Lesen
@@ -290,6 +311,8 @@ struct MailboxView: View {
 struct MessageListRow: View {
     let message: ClientMessage
     var analysis: StoredMessage?
+    /// Nur im gemeinsamen Posteingang: aus welchem Konto die Nachricht stammt.
+    var accountName: String?
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -301,6 +324,7 @@ struct MessageListRow: View {
                     Spacer()
                     Text(message.date.formatted(.relative(presentation: .numeric))).font(.caption).foregroundStyle(CTW.muted)
                 }
+                if let accountName, !accountName.isEmpty { Badge(text: accountName, color: CTW.grey500, symbol: "person.crop.circle") }
                 Text(message.subject.isEmpty ? "(kein Betreff)" : message.subject)
                     .font(.system(size: 12.5, weight: message.isRead ? .regular : .medium)).foregroundStyle(CTW.ink).lineLimit(1)
                 if let a = analysis {
@@ -397,7 +421,19 @@ struct MailProvider: Identifiable, Hashable {
     var id: String { name }
     var isCustom: Bool { imapHost.isEmpty }
 
-    static let all: [MailProvider] = [
+    /// Eingebaute Anbieter; die Organisation kann sie ergänzen oder ersetzen (`PolicyStore`).
+    static var available: [MailProvider] { available(policy: PolicyStore.current) }
+
+    static func available(policy: Policy) -> [MailProvider] {
+        let own = (policy.providers ?? []).map { p in
+            MailProvider(name: p.name, imapHost: p.imapHost, smtpHost: p.smtpHost, smtpPort: UInt16(clamping: p.smtpPort ?? 587),
+                         smtpSecurity: p.smtpSecurity?.lowercased() == "tls" ? .tls : .startTLS, hint: p.hint ?? "")
+        }
+        if policy.onlyListedProviders == true { return own }
+        return own + builtIn
+    }
+
+    static let builtIn: [MailProvider] = [
         .init(name: "iCloud", imapHost: "imap.mail.me.com", smtpHost: "smtp.mail.me.com", smtpPort: 587, smtpSecurity: .startTLS,
               hint: "Erzeuge unter appleid.apple.com → Anmeldung und Sicherheit → App-spezifische Passwörter ein Passwort für MailPilot. Dein normales Apple-Passwort funktioniert hier nicht."),
         .init(name: "GMX", imapHost: "imap.gmx.net", smtpHost: "mail.gmx.net", smtpPort: 587, smtpSecurity: .startTLS,
@@ -420,11 +456,12 @@ struct MailProvider: Identifiable, Hashable {
 struct AddAccountSheet: View {
     @EnvironmentObject var engine: Engine
     @Environment(\.dismiss) private var dismiss
-    @ViewState private var provider = MailProvider.all[0]
+    @ViewState private var provider = MailProvider.available.first ?? MailProvider.builtIn[0]
     @ViewState private var displayName = ""
     @ViewState private var email = ""
     @ViewState private var username = ""
     @ViewState private var password = ""
+    @ViewState private var signature = ""
     @ViewState private var imapHost = ""
     @ViewState private var imapPort = "993"
     @ViewState private var smtpHost = ""
@@ -441,13 +478,14 @@ struct AddAccountSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Eyebrow(text: "Konto hinzufügen")
+            Eyebrow(text: "Konto hinzufügen · \(engine.settings.clientAccounts.count) von \(ClientAccount.maxAccounts)")
             Form {
-                Picker("Anbieter", selection: $provider) { ForEach(MailProvider.all) { Text($0.name).tag($0) } }
+                Picker("Anbieter", selection: $provider) { ForEach(MailProvider.available) { Text($0.name).tag($0) } }
                 TextField("Name im Absender (optional)", text: $displayName)
                 TextField("E-Mail-Adresse", text: $email).textContentType(.emailAddress)
                 TextField("Benutzername (leer = E-Mail-Adresse)", text: $username)
                 SecureField(provider.name == "iCloud" ? "App-spezifisches Passwort" : "Passwort", text: $password)
+                TextField("Signatur (optional)", text: $signature, axis: .vertical).lineLimit(2...6)
                 if provider.isCustom {
                     TextField("IMAP-Server", text: $imapHost)
                     TextField("IMAP-Port", text: $imapPort)
@@ -470,7 +508,7 @@ struct AddAccountSheet: View {
                 Button("Abbrechen") { dismiss() }.buttonStyle(.ctwSecondary).keyboardShortcut(.cancelAction)
                 Button { connect() } label: { Label("Verbinden", systemImage: "checkmark") }
                     .buttonStyle(.ctwPrimary).keyboardShortcut(.defaultAction)
-                    .disabled(working || !valid)
+                    .disabled(working || !valid || engine.settings.clientAccounts.count >= ClientAccount.maxAccounts)
             }
         }
         .padding(20)
@@ -490,9 +528,10 @@ struct AddAccountSheet: View {
         let login = username.trimmingCharacters(in: .whitespaces)
         // Zwei Konten beim selben Anbieter brauchen verschiedene Namen (sie erscheinen als „<Name> (IMAP)“).
         let taken = engine.settings.clientAccounts.contains { $0.name == provider.name }
-        var account = ClientAccount(name: provider.isCustom ? (mail.split(separator: "@").last.map(String.init) ?? "IMAP") : (taken ? "\(provider.name) \(mail)" : provider.name),
+        var account = ClientAccount(name: provider.isCustom ? (mail.split(separator: "@").last.map(String.init) ?? "IMAP") : (taken ? mail : provider.name),
                                     email: mail, username: login.isEmpty ? mail : login, host: host, port: UInt16(imapPort) ?? 993,
                                     displayName: displayName.trimmingCharacters(in: .whitespaces))
+        account.signature = signature.trimmingCharacters(in: .whitespacesAndNewlines)
         account.smtpHost = provider.isCustom ? smtpHost.trimmingCharacters(in: .whitespaces) : provider.smtpHost
         account.smtpPort = provider.isCustom ? (UInt16(smtpPort) ?? 587) : provider.smtpPort
         account.smtpSecurity = provider.isCustom ? smtpSecurity : provider.smtpSecurity
@@ -531,16 +570,70 @@ struct MailboxSidebarTree: View {
         return out
     }
 
+    private var accounts: [ClientAccount] { engine.settings.clientAccounts }
+
     var body: some View {
-        ForEach(engine.settings.clientAccounts) { account in
-            if engine.settings.clientAccounts.count > 1 { Eyebrow(text: account.name).padding(.leading, 28).listRowSeparator(.hidden) }
-            ForEach(Self.ordered(model.folders[account.id.uuidString] ?? [])) { f in
-                folderRow(f)
+        if accounts.count > 1 { allInboxesRow }
+        ForEach(accounts) { account in
+            let key = account.id.uuidString
+            accountHeader(account, key: key)
+            if model.isExpanded(key) {
+                ForEach(Self.ordered(model.folders[key] ?? [])) { f in folderRow(f) }
+                if engine.settings.useClaude { claudeSwitch(account).listRowSeparator(.hidden) }
             }
-            claudeSwitch(account).listRowSeparator(.hidden)
         }
-        Button { model.addingAccount = true } label: { Label("Konto hinzufügen", systemImage: "plus").font(.caption) }
-            .buttonStyle(.plain).foregroundStyle(CTW.muted).padding(.leading, 14).listRowSeparator(.hidden)
+        addAccountRow
+    }
+
+    private var allInboxesRow: some View {
+        let selected = model.showAllInboxes
+        return Button { model.selectAllInboxes(); open() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "tray.full.fill").foregroundStyle(selected ? CTW.accent : CTW.muted).frame(width: 18)
+                Text("Alle Posteingänge").lineLimit(1)
+                Spacer(minLength: 0)
+                if model.totalUnread > 0 { Text("\(model.totalUnread)").font(.caption2).monospacedDigit().foregroundStyle(CTW.muted) }
+            }
+            .padding(.leading, 14).padding(.vertical, 2)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRowSeparator(.hidden)
+        .listRowBackground(selected ? RoundedRectangle(cornerRadius: 6).fill(CTW.accent.opacity(0.14)).padding(.horizontal, 10) : nil)
+    }
+
+    /// Kopfzeile eines Kontos: auf-/zuklappen, ungelesene Mails im Posteingang, Zustand des Abgleichs.
+    private func accountHeader(_ account: ClientAccount, key: String) -> some View {
+        let open = model.isExpanded(key)
+        let state = model.accountState[key]
+        return Button { model.setExpanded(key, !open) } label: {
+            HStack(spacing: 6) {
+                Image(systemName: open ? "chevron.down" : "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(CTW.muted).frame(width: 12)
+                Text(account.name).font(.caption.weight(.semibold)).foregroundStyle(CTW.ink).lineLimit(1)
+                Spacer(minLength: 0)
+                switch state {
+                case .syncing: ProgressView().controlSize(.mini)
+                case .failed(let message):
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(CTW.action).help(message).accessibilityLabel("Fehler: \(message)")
+                default: EmptyView()
+                }
+                if !open, model.unread(account: key) > 0 { Text("\(model.unread(account: key))").font(.caption2).monospacedDigit().foregroundStyle(CTW.muted) }
+            }
+            .padding(.leading, 6).padding(.top, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRowSeparator(.hidden)
+    }
+
+    private var addAccountRow: some View {
+        let full = accounts.count >= ClientAccount.maxAccounts
+        return VStack(alignment: .leading, spacing: 2) {
+            Button { model.addingAccount = true } label: { Label("Konto hinzufügen", systemImage: "plus").font(.caption) }
+                .buttonStyle(.plain).foregroundStyle(CTW.muted).disabled(full)
+            Text("\(accounts.count) von \(ClientAccount.maxAccounts) Konten").font(.caption2).foregroundStyle(CTW.muted)
+        }
+        .padding(.leading, 14).listRowSeparator(.hidden)
     }
 
     private func folderRow(_ f: ClientFolder) -> some View {

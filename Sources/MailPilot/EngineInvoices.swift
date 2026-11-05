@@ -84,7 +84,7 @@ extension Engine {
 
     /// Liest alle noch offenen Rechnungs-Mails aus (Knopf in der Rechnungsansicht).
     func extractAllInvoices() async {
-        guard !invoiceBusy, let claude = claudeInteractive else { if claude == nil { lastError = ClaudeError.notFound.localizedDescription }; return }
+        guard !invoiceBusy, let claude = claudeInteractive else { if claude == nil { lastError = claudeUnavailableMessage }; return }
         invoiceBusy = true
         defer { invoiceBusy = false; reload() }
         while true {

@@ -44,6 +44,16 @@ struct RuleCondition: Codable, Hashable, Identifiable {
     var value = ""
 }
 
+extension RuleCondition {
+    /// `id` darf fehlen (von Hand geschriebene Vorgaben der Organisation haben keine).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID(),
+                  field: try c.decodeIfPresent(RuleField.self, forKey: .field) ?? .sender,
+                  value: try c.decodeIfPresent(String.self, forKey: .value) ?? "")
+    }
+}
+
 /// Eigene Regel: Bedingungen → Kategorie, Ordner, Priorität, Flagge. Regeln gelten für eingehende Mails.
 struct UserRule: Codable, Hashable, Identifiable {
     var id = UUID()

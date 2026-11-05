@@ -161,8 +161,52 @@ extension Store {
             .split(separator: " ").map(String.init)
     }
 
-    func saveClientBody(account: String, folder: String, uid: UInt32, raw: Data, preview: String) throws {
-        try db.exec("UPDATE c_message SET raw = ?, preview = ? WHERE account = ? AND folder = ? AND uid = ?", [raw, preview, account, folder, Int(uid)])
+    /// Speichert die Rohnachricht, die Vorschau und den Klartext für die Suche (gekürzt).
+    func saveClientBody(account: String, folder: String, uid: UInt32, raw: Data, preview: String, text: String = "") throws {
+        try db.exec("UPDATE c_message SET raw = ?, preview = ?, body_text = ? WHERE account = ? AND folder = ? AND uid = ?",
+                    [raw, preview, String(text.prefix(Self.searchTextLimit)), account, folder, Int(uid)])
+    }
+
+    static let searchTextLimit = 60_000
+
+    /// Nachrichten, deren Rohtext schon gespeichert, aber noch nicht für die Suche aufbereitet ist (Bestand aus älteren Versionen).
+    func clientBodiesWithoutSearchText(limit: Int) -> [(account: String, folder: String, uid: UInt32, raw: Data)] {
+        ((try? db.query("SELECT account, folder, uid, raw FROM c_message WHERE raw IS NOT NULL AND body_text IS NULL LIMIT ?", [limit])) ?? []).compactMap { r in
+            guard let raw = r.data("raw") else { return nil }
+            return (r.string("account") ?? "", r.string("folder") ?? "", UInt32(truncatingIfNeeded: r.int("uid")), raw)
+        }
+    }
+
+    func setClientSearchText(account: String, folder: String, uid: UInt32, text: String) {
+        try? db.exec("UPDATE c_message SET body_text = ? WHERE account = ? AND folder = ? AND uid = ?", [String(text.prefix(Self.searchTextLimit)), account, folder, Int(uid)])
+    }
+
+    /// Sucht in den lokal gespeicherten Nachrichten (Kopfzeilen, Vorschau, geladene Texte). Alle Begriffe müssen vorkommen.
+    func clientSearch(_ q: ClientSearchQuery, scope: ClientSearchScope, limit: Int = 300) -> [ClientMessage] {
+        guard !q.isEmpty else { return [] }
+        var clauses: [String] = []
+        var args: [Any] = []
+        func like(_ s: String) -> String {
+            "%" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_") + "%"
+        }
+        for t in q.terms {
+            clauses.append("(subject LIKE ? ESCAPE '\\' OR sender_name LIKE ? ESCAPE '\\' OR sender_email LIKE ? ESCAPE '\\' OR recipients LIKE ? ESCAPE '\\' OR preview LIKE ? ESCAPE '\\' OR body_text LIKE ? ESCAPE '\\')")
+            args += Array(repeating: like(t), count: 6)
+        }
+        for t in q.from { clauses.append("(sender_name LIKE ? ESCAPE '\\' OR sender_email LIKE ? ESCAPE '\\')"); args += [like(t), like(t)] }
+        for t in q.to { clauses.append("recipients LIKE ? ESCAPE '\\'"); args.append(like(t)) }
+        for t in q.subject { clauses.append("subject LIKE ? ESCAPE '\\'"); args.append(like(t)) }
+        switch scope {
+        case .folder(let account, let path): clauses.append("account = ? AND folder = ?"); args += [account, path]
+        case .account(let account): clauses.append("account = ?"); args.append(account)
+        case .all: break
+        }
+        args.append(limit)
+        return ((try? db.query("""
+            SELECT account, folder, uid, message_id, in_reply_to, refs, subject, sender_name, sender_email, recipients, date, flags, size, preview,
+                   unsub, unsub_post, hdr_flags, (raw IS NOT NULL) AS has_body
+            FROM c_message WHERE \(clauses.joined(separator: " AND ")) ORDER BY date DESC LIMIT ?
+            """, args)) ?? []).map(clientMessage)
     }
 
     func clientBody(account: String, folder: String, uid: UInt32) -> Data? {
@@ -176,6 +220,16 @@ extension Store {
                    unsub, unsub_post, hdr_flags, (raw IS NOT NULL) AS has_body
             FROM c_message WHERE account = ? AND folder = ? ORDER BY date DESC LIMIT ?
             """, [account, folder, limit])) ?? []).map(clientMessage)
+    }
+
+    /// Nachrichten aus den Posteingängen aller Konten, neueste zuerst.
+    func clientUnifiedInbox(limit: Int = 500) -> [ClientMessage] {
+        ((try? db.query("""
+            SELECT account, folder, uid, message_id, in_reply_to, refs, subject, sender_name, sender_email, recipients, date, flags, size, preview,
+                   unsub, unsub_post, hdr_flags, (raw IS NOT NULL) AS has_body
+            FROM c_message WHERE (account, folder) IN (SELECT account, path FROM c_folder WHERE special = 'inbox')
+            ORDER BY date DESC LIMIT ?
+            """, [limit])) ?? []).map(clientMessage)
     }
 
     func clientMessage(_ r: Row) -> ClientMessage {

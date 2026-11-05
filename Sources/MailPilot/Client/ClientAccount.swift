@@ -14,6 +14,8 @@ struct ClientAccount: Codable, Identifiable, Hashable {
     var smtpHost = "smtp.mail.me.com"
     var smtpPort: UInt16 = 587
     var smtpSecurity: SMTPSecurity = .startTLS
+    /// Signatur (Klartext), wird beim Verfassen unter den Text gesetzt.
+    var signature = ""
 
     static let iCloudHost = "imap.mail.me.com"
 
@@ -35,6 +37,7 @@ struct ClientAccount: Codable, Identifiable, Hashable {
         smtpHost = try c.decodeIfPresent(String.self, forKey: .smtpHost) ?? "smtp.mail.me.com"
         smtpPort = try c.decodeIfPresent(UInt16.self, forKey: .smtpPort) ?? 587
         smtpSecurity = try c.decodeIfPresent(SMTPSecurity.self, forKey: .smtpSecurity) ?? .startTLS
+        signature = try c.decodeIfPresent(String.self, forKey: .signature) ?? ""
     }
 
     static func iCloud(email: String, displayName: String = "") -> ClientAccount {
@@ -57,6 +60,30 @@ struct ClientAccount: Codable, Identifiable, Hashable {
 }
 
 extension ClientAccount {
+    /// So viele Konten des eigenen Clients kann MailPilot gleichzeitig verwalten.
+    static let hardLimit = 16
+    /// Die Organisation kann die Zahl weiter begrenzen (Vorgabe `maxAccounts`).
+    static var maxAccounts: Int { PolicyStore.current.maxClientAccounts }
+
+    /// Fehlertext, wenn `new` nicht zu `existing` hinzugefügt werden darf (Obergrenze, gleiches Postfach doppelt), sonst `nil`.
+    static func rejection(adding new: ClientAccount, to existing: [ClientAccount]) -> String? {
+        if existing.count >= maxAccounts { return "Mehr als \(maxAccounts) Konten sind nicht möglich. Entferne zuerst ein Konto." }
+        let mail = new.email.lowercased()
+        if existing.contains(where: { $0.email.lowercased() == mail && $0.host.lowercased() == new.host.lowercased() }) {
+            return "Dieses Konto (\(new.email)) ist bereits verbunden."
+        }
+        return nil
+    }
+
+    /// Kontoname, der unter den vorhandenen noch frei ist („GMX“, „GMX 2“, „GMX 3“ …). Der Name erscheint als „<Name> (IMAP)“ in der Analyse.
+    static func uniqueName(_ wanted: String, among existing: [ClientAccount]) -> String {
+        let taken = Set(existing.map { $0.name.lowercased() })
+        if !taken.contains(wanted.lowercased()) { return wanted }
+        var n = 2
+        while taken.contains("\(wanted) \(n)".lowercased()) { n += 1 }
+        return "\(wanted) \(n)"
+    }
+
     /// Beim Kopieren von appleid.apple.com kommen oft typografische Bindestriche (‑ – −) oder unsichtbare Zeichen mit.
     /// Die werden zu „-“ bzw. entfernt; echte Sonderzeichen bleiben stehen und werden vom Client gemeldet.
     static func normalizedPassword(_ raw: String) -> String {

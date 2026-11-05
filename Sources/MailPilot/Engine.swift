@@ -19,6 +19,9 @@ final class Engine: ObservableObject {
 
     @Published var settings: AppSettings {
         didSet {
+            // Vorgaben der Organisation gelten immer; eine Änderung dagegen wird sofort zurückgesetzt.
+            let enforced = PolicyStore.current.apply(to: settings)
+            if enforced != settings { settings = enforced }
             if persistSettings { settings.save(to: Paths.settings) }
             UsageMonitor.shared.update(settings.usageGuard)
             if oldValue.pollMinutes != settings.pollMinutes { schedule() }
@@ -85,7 +88,7 @@ final class Engine: ObservableObject {
 
     private init() {
         do { store = try Store() } catch { fatalError("Datenbank: \(error)") }
-        settings = AppSettings.load(from: Paths.settings)
+        settings = PolicyStore.current.apply(to: AppSettings.load(from: Paths.settings))
         scannedAccounts = Set((store.value("scannedAccounts") ?? "").split(separator: "\n").map(String.init))
         myAddresses = (store.value("myAddresses") ?? "").split(separator: ",").map(String.init)
         UsageMonitor.shared.configure(store: store)
@@ -96,12 +99,22 @@ final class Engine: ObservableObject {
     }
 
     var claude: ClaudeClient? {
-        ClaudeClient.locate(preferred: settings.claudePath).map { ClaudeClient(executable: $0, model: settings.model) }
+        guard settings.useClaude else { return nil }
+        return ClaudeClient.locate(preferred: settings.claudePath).map { ClaudeClient(executable: $0, model: settings.model, extraEnvironment: PolicyStore.current.claude?.environment ?? [:]) }
+    }
+
+    /// Text für „Claude nicht verfügbar“: ausgeschaltet (Einstellung oder Vorgabe) oder nicht gefunden.
+    var claudeUnavailableMessage: String {
+        settings.useClaude ? ClaudeError.notFound.localizedDescription
+            : (PolicyStore.current.isLocked(.claudeEnabled) ? "Claude ist von der Organisation ausgeschaltet." : "Claude ist in den Einstellungen ausgeschaltet.")
     }
 
     /// Günstigeres Modell für die Massenanalyse älterer Mails.
     var claudeBulk: ClaudeClient? {
-        ClaudeClient.locate(preferred: settings.claudePath).map { ClaudeClient(executable: $0, model: settings.modelBulk.isEmpty ? settings.model : settings.modelBulk) }
+        guard settings.useClaude else { return nil }
+        return ClaudeClient.locate(preferred: settings.claudePath).map {
+            ClaudeClient(executable: $0, model: settings.modelBulk.isEmpty ? settings.model : settings.modelBulk, extraEnvironment: PolicyStore.current.claude?.environment ?? [:])
+        }
     }
 
     /// Für Aufrufe, die der Nutzer per Knopfdruck auslöst: läuft auch bei erreichter Pause-Grenze.
@@ -115,7 +128,7 @@ final class Engine: ObservableObject {
     var enabledAccountNames: [String] { accounts.map(\.name).filter(settings.isEnabled) }
 
     /// Freigegebene Konten, für die der Erstscan noch aussteht.
-    var pendingScanAccounts: [String] { enabledAccountNames.filter { !scannedAccounts.contains($0) } }
+    var pendingScanAccounts: [String] { settings.useClaude ? enabledAccountNames.filter { !scannedAccounts.contains($0) } : [] }
 
     var initialComplete: Bool { !accounts.isEmpty && pendingScanAccounts.isEmpty }
 
@@ -386,7 +399,8 @@ final class Engine: ObservableObject {
     func runCycle() async {
         guard initialComplete else { return }
         guard !isRunning else { return }
-        guard let claude else { lastError = ClaudeError.notFound.localizedDescription; return }
+        guard settings.useClaude else { status = "Claude ausgeschaltet"; return }
+        guard let claude else { lastError = claudeUnavailableMessage; return }
         isRunning = true
         lastError = nil
         defer { isRunning = false; lastRun = Date(); reload() }
@@ -784,7 +798,7 @@ final class Engine: ObservableObject {
             lastError = "Dieses Gespräch ist vom Datenschutz ausgenommen – Claude erhält keinen Inhalt."
             return nil
         }
-        guard let claude = (interactive ? claudeInteractive : self.claude) else { lastError = ClaudeError.notFound.localizedDescription; return nil }
+        guard let claude = (interactive ? claudeInteractive : self.claude) else { lastError = claudeUnavailableMessage; return nil }
         do {
             let msgs = messages(in: thread)
             let followUp = thread.isFollowUpCase
@@ -836,7 +850,7 @@ final class Engine: ObservableObject {
     }
 
     func generateBriefing() async {
-        guard let claude = claudeInteractive else { lastError = ClaudeError.notFound.localizedDescription; return }
+        guard let claude = claudeInteractive else { lastError = claudeUnavailableMessage; return }
         do { try await generateBriefing(claude: claude) } catch { lastError = error.localizedDescription }
     }
 
@@ -883,7 +897,7 @@ final class Engine: ObservableObject {
     }
 
     func testClaude() async -> String {
-        guard let claude = claudeInteractive else { return ClaudeError.notFound.localizedDescription }
+        guard let claude = claudeInteractive else { return claudeUnavailableMessage }
         do {
             let r = try await claude.ping()
             return "Verbindung ok (\(claude.executable)): \(r)"

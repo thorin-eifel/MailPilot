@@ -62,6 +62,21 @@ struct PrivacyRule: Codable, Hashable, Identifiable {
     var conditions: [RuleCondition] = [RuleCondition()]
     /// false = der Mailtext wird gar nicht erst gespeichert.
     var keepBody = false
+    /// Von der Organisation vorgegeben: nicht änderbar, wird nicht in den Einstellungen gespeichert.
+    var managed = false
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Ausnahme"
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        matchAll = try c.decodeIfPresent(Bool.self, forKey: .matchAll) ?? false
+        conditions = try c.decodeIfPresent([RuleCondition].self, forKey: .conditions) ?? [RuleCondition()]
+        keepBody = try c.decodeIfPresent(Bool.self, forKey: .keepBody) ?? false
+        managed = try c.decodeIfPresent(Bool.self, forKey: .managed) ?? false
+    }
 
     /// Absender- und Domain-Bedingungen gelten bei gesendeten Mails für die Empfänger.
     func matches(_ m: StoredMessage) -> Bool {
@@ -166,6 +181,20 @@ struct AppSettings: Codable, Equatable {
     var clientAccounts: [ClientAccount] = []
     /// Konten aus Apple Mail einbeziehen. Aus: Apple Mail wird nie angesprochen (auch keine Berechtigungsabfrage).
     var useAppleMail = true
+    /// Claude insgesamt verwenden. Aus: Der Mail-Client läuft ohne jede Analyse, nichts geht an Claude.
+    var useClaude = true
+    /// Kalender, Erinnerungen, Fristen-Übernahme, Einladungen und freie Zeiten (macOS-Kalender und -Erinnerungen).
+    var useCalendar = true
+    /// Namen und Gruppen aus der Kontakte-App.
+    var useContacts = true
+    /// Beim Verfassen formatierten Text (fett, kursiv, Links) anbieten.
+    var richCompose = true
+
+    /// Ein neues Konto darf nicht still für Claude freigegeben sein: Ist die Auswahl noch „alle“ (`nil`), wird sie zuerst auf die
+    /// bisher bekannten Konten festgeschrieben – das neue gehört nicht dazu und wird vom Nutzer ausdrücklich eingeschaltet.
+    mutating func protectNewAccount(knownAccounts: [String]) {
+        if enabledAccounts == nil { enabledAccounts = knownAccounts }
+    }
 
     func isEnabled(_ account: String) -> Bool {
         enabledAccounts.map { $0.contains(account) } ?? true
@@ -195,7 +224,10 @@ struct AppSettings: Codable, Equatable {
     func save(to url: URL) {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? enc.encode(self).write(to: url, options: .atomic)
+        // Von der Organisation vorgegebene Ausnahmen gehören nicht in die Datei des Nutzers.
+        var copy = self
+        copy.privacyRules.removeAll { $0.managed }
+        try? enc.encode(copy).write(to: url, options: .atomic)
     }
 }
 
@@ -280,5 +312,9 @@ extension AppSettings {
         maxCallsPerDay = v(.maxCallsPerDay, maxCallsPerDay)
         clientAccounts = v(.clientAccounts, clientAccounts)
         useAppleMail = v(.useAppleMail, useAppleMail)
+        useClaude = v(.useClaude, useClaude)
+        useCalendar = v(.useCalendar, useCalendar)
+        useContacts = v(.useContacts, useContacts)
+        richCompose = v(.richCompose, richCompose)
     }
 }

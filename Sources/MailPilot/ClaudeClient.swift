@@ -53,6 +53,8 @@ struct MessageAnalysis: Decodable {
 struct ClaudeClient {
     var executable: String
     var model: String
+    /// Zusätzliche Umgebungsvariablen aus den Vorgaben der Organisation (z. B. Gateway).
+    var extraEnvironment: [String: String] = [:]
     /// Vom Nutzer ausgelöst (Knopfdruck): läuft auch bei erreichter Pause-Grenze.
     var interactive = false
     /// Wofür der Aufruf dient (für die Nutzungsübersicht).
@@ -84,6 +86,7 @@ struct ClaudeClient {
         var env = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         env["PATH"] = "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+        for (k, v) in extraEnvironment where k != "PATH" { env[k] = v }
 
         let started = Date()
         let result = try await ProcessRunner.run(executable: executable, arguments: args, stdin: prompt,

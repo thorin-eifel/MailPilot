@@ -26,7 +26,7 @@ struct BriefingView: View {
         .background(CTW.bg)
         // Bei jedem Öffnen frisch erstellen (nicht beim Rendern der Vorschau und nicht doppelt).
         .task {
-            guard !CommandLine.arguments.contains("--render"), !engine.isBriefing else { return }
+            guard !CommandLine.arguments.contains("--render"), !engine.isBriefing, engine.settings.useClaude else { return }
             await engine.generateBriefing()
         }
     }
@@ -44,7 +44,7 @@ struct BriefingView: View {
             if engine.isBriefing { ProgressView().controlSize(.small) }
             Button { Task { await engine.generateBriefing() } } label: { Label("Neu erstellen", systemImage: "sparkles") }
                 .buttonStyle(.ctwPrimary)
-                .disabled(engine.isBriefing)
+                .disabled(engine.isBriefing || !engine.settings.useClaude)
         }
     }
 
@@ -89,8 +89,10 @@ struct BriefingView: View {
             Eyebrow(text: "Bereiche").padding(.top, 6)
             LazyVGrid(columns: cols, spacing: 12) {
                 area(.mailbox, nil)
-                area(.calendar, nil)
-                area(.reminders, planner.overdueCount)
+                if engine.settings.useCalendar {
+                    area(.calendar, nil)
+                    area(.reminders, planner.overdueCount)
+                }
                 area(.invoices, engine.invoiceAlertCount)
                 area(.invites, engine.newInviteCount)
                 area(.newsletter, nil)

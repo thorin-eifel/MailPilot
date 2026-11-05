@@ -33,6 +33,8 @@ Menüleisten-App mit Dashboard, die Apple Mail mit Claude automatisiert:
 
 Ausführliche Anleitung: [Benutzerhandbuch](docs/Benutzerhandbuch.md)
 
+Für den Einsatz im Unternehmen: [Verwaltung (zentrale Vorgaben)](docs/Verwaltung.md) und [Datenschutz und Claude](docs/Datenschutz-und-Claude.md)
+
 ## Voraussetzungen
 
 - macOS 15 oder neuer, Apple Mail mit eingerichteten Konten
